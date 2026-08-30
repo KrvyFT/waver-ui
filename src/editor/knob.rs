@@ -3,7 +3,7 @@
 use eframe::egui;
 
 const KNOB_RADIUS: f32 = 18.0;
-const DRAG_SENSITIVITY: f32 = 0.005;
+const DRAG_SENSITIVITY: f32 = 0.008;
 
 /// Mapping curve for a knob.
 #[derive(Clone, Copy, Debug)]
@@ -13,6 +13,9 @@ pub enum KnobScale {
 }
 
 /// Draw and interact with a rotary knob.
+///
+/// Mutates `value` while dragging / double-click reset, and marks the response
+/// changed so callers can sync into [`waver_core::ParamCell`].
 pub fn rotary_knob(
     ui: &mut egui::Ui,
     id: egui::Id,
@@ -22,39 +25,40 @@ pub fn rotary_knob(
     scale: KnobScale,
 ) -> egui::Response {
     ui.push_id(id, |ui| {
-        let (rect, response) = ui.allocate_exact_size(
+        let (rect, mut response) = ui.allocate_exact_size(
             egui::vec2(KNOB_RADIUS * 2.0 + 8.0, KNOB_RADIUS * 2.0 + 22.0),
             egui::Sense::click_and_drag(),
         );
 
         if response.double_clicked() {
             *value = default_for_range(&range, scale);
+            response.mark_changed();
         }
 
         if response.dragged() {
             let delta = -response.drag_delta().y * DRAG_SENSITIVITY;
-            *value = match scale {
+            let next = match scale {
                 KnobScale::Linear => {
                     let span = *range.end() - *range.start();
                     (*value + delta * span).clamp(*range.start(), *range.end())
                 }
                 KnobScale::Logarithmic => {
-                    let log_min = range.start().ln();
-                    let log_max = range.end().ln();
-                    let log_v = value.ln().clamp(log_min, log_max);
+                    let log_min = range.start().max(1e-6).ln();
+                    let log_max = range.end().max(1e-6).ln();
+                    let log_v = value.max(1e-6).ln().clamp(log_min, log_max);
                     (log_v + delta * (log_max - log_min))
                         .exp()
                         .clamp(*range.start(), *range.end())
                 }
             };
+            if (next - *value).abs() > f32::EPSILON {
+                *value = next;
+                response.mark_changed();
+            }
         }
 
-        if ui.is_enabled() {
-            ui.ctx().set_cursor_icon(if response.hovered() || response.dragged() {
-                egui::CursorIcon::Grab
-            } else {
-                egui::CursorIcon::Default
-            });
+        if response.hovered() || response.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
         }
 
         let center = egui::pos2(rect.center().x, rect.top() + KNOB_RADIUS + 2.0);
@@ -118,15 +122,16 @@ pub fn rotary_knob(
     .inner
 }
 
-/// Four-position wave selector styled as clickable buttons.
-pub fn wave_selector(ui: &mut egui::Ui, value: &mut f32) {
+/// Four-position wave selector. Returns true when the selection changed.
+pub fn wave_selector(ui: &mut egui::Ui, value: &mut f32) -> bool {
+    let before = value.round() as i32;
+    let mut wave = before;
     ui.vertical(|ui| {
         ui.label(
             egui::RichText::new("波形")
                 .size(10.0)
                 .color(egui::Color32::from_gray(150)),
         );
-        let mut wave = value.round() as i32;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             for (name, idx) in [("~", 0), ("/|", 1), ("⊓", 2), ("△", 3)] {
@@ -148,8 +153,9 @@ pub fn wave_selector(ui: &mut egui::Ui, value: &mut f32) {
                 }
             }
         });
-        *value = wave as f32;
     });
+    *value = wave as f32;
+    wave != before
 }
 
 fn normalized_value(value: f32, range: &std::ops::RangeInclusive<f32>, scale: KnobScale) -> f32 {
@@ -163,13 +169,13 @@ fn normalized_value(value: f32, range: &std::ops::RangeInclusive<f32>, scale: Kn
             }
         }
         KnobScale::Logarithmic => {
-            let log_min = range.start().ln();
-            let log_max = range.end().ln();
+            let log_min = range.start().max(1e-6).ln();
+            let log_max = range.end().max(1e-6).ln();
             let span = log_max - log_min;
             if span <= f32::EPSILON {
                 0.0
             } else {
-                ((value.ln() - log_min) / span).clamp(0.0, 1.0)
+                ((value.max(1e-6).ln() - log_min) / span).clamp(0.0, 1.0)
             }
         }
     }
@@ -179,8 +185,8 @@ fn default_for_range(range: &std::ops::RangeInclusive<f32>, scale: KnobScale) ->
     match scale {
         KnobScale::Linear => (*range.start() + *range.end()) * 0.5,
         KnobScale::Logarithmic => {
-            let log_min = range.start().ln();
-            let log_max = range.end().ln();
+            let log_min = range.start().max(1e-6).ln();
+            let log_max = range.end().max(1e-6).ln();
             ((log_min + log_max) * 0.5).exp()
         }
     }

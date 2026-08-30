@@ -1,4 +1,4 @@
-//! Cable drag state machine.
+//! Cable drag state machine and hit testing.
 
 use eframe::egui;
 use waver_core::PortRef;
@@ -31,7 +31,7 @@ impl CableState {
     }
 }
 
-/// Draw a quadratic bezier cable between two jack centers.
+/// Draw a cubic bezier cable between two jack centers.
 pub fn draw_cable(
     painter: &egui::Painter,
     from: egui::Pos2,
@@ -40,9 +40,7 @@ pub fn draw_cable(
     width: f32,
     dashed: bool,
 ) {
-    let ctrl_offset = ((to.x - from.x).abs() * 0.5).max(40.0);
-    let c1 = egui::pos2(from.x + ctrl_offset, from.y);
-    let c2 = egui::pos2(to.x - ctrl_offset, to.y);
+    let (c1, c2) = control_points(from, to);
 
     if dashed {
         let steps = 24;
@@ -67,6 +65,14 @@ pub fn draw_cable(
     }
 }
 
+fn control_points(from: egui::Pos2, to: egui::Pos2) -> (egui::Pos2, egui::Pos2) {
+    let ctrl_offset = ((to.x - from.x).abs() * 0.5).max(40.0);
+    (
+        egui::pos2(from.x + ctrl_offset, from.y),
+        egui::pos2(to.x - ctrl_offset, to.y),
+    )
+}
+
 fn bezier_point(p0: egui::Pos2, p1: egui::Pos2, p2: egui::Pos2, p3: egui::Pos2, t: f32) -> egui::Pos2 {
     let u = 1.0 - t;
     let tt = t * t;
@@ -79,11 +85,33 @@ fn bezier_point(p0: egui::Pos2, p1: egui::Pos2, p2: egui::Pos2, p3: egui::Pos2, 
     )
 }
 
-/// Hit-test radius around a jack center.
-pub const JACK_HIT_RADIUS: f32 = 10.0;
-
-pub fn jack_at(pointer: egui::Pos2, jacks: &[JackPos]) -> Option<JackPos> {
-    jacks.iter().copied().find(|jack| {
-        jack.center.distance(pointer) <= JACK_HIT_RADIUS
-    })
+fn dist_point_to_segment(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
+    let ab = b - a;
+    let len_sq = ab.length_sq();
+    if len_sq <= f32::EPSILON {
+        return p.distance(a);
+    }
+    let t = ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+    let proj = a + ab * t;
+    p.distance(proj)
 }
+
+/// Minimum distance from pointer to the bezier cable (sampled).
+pub fn cable_distance(pointer: egui::Pos2, from: egui::Pos2, to: egui::Pos2) -> f32 {
+    let (c1, c2) = control_points(from, to);
+    let steps = 24;
+    let mut min_d = f32::MAX;
+    let mut prev = bezier_point(from, c1, c2, to, 0.0);
+    for i in 1..=steps {
+        let next = bezier_point(from, c1, c2, to, i as f32 / steps as f32);
+        min_d = min_d.min(dist_point_to_segment(pointer, prev, next));
+        prev = next;
+    }
+    min_d
+}
+
+/// Hit radius for deleting / selecting a cable.
+pub const CABLE_HIT_RADIUS: f32 = 22.0;
+
+/// Hit-test radius around a jack center.
+pub const JACK_HIT_RADIUS: f32 = 12.0;

@@ -28,8 +28,8 @@ impl PatchState {
             compile_error: None,
             selected: None,
         };
-        let vco = state.add_node_at(NodeKind::Vco, egui::pos2(80.0, 120.0));
-        let out = state.add_node_at(NodeKind::Output, egui::pos2(360.0, 120.0));
+        let vco = state.add_node_at(NodeKind::Vco, egui::pos2(40.0, 160.0));
+        let out = state.add_node_at(NodeKind::Output, egui::pos2(360.0, 180.0));
         state.try_connect(
             PortRef {
                 node: vco,
