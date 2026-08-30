@@ -1,20 +1,24 @@
 //! Patch canvas: nodes, cables, interaction.
 
 mod cable;
+mod knob;
 mod node_view;
 
 use std::collections::HashMap;
 
 use eframe::egui;
 use rtrb::Producer;
-use waver_core::{NodeId, NodeKind, RtCommand, param_label};
+use waver_core::{NodeId, NodeKind, ParamId, RtCommand, param_label};
 
 use crate::patch_state::PatchState;
 
 pub use cable::CableState;
 
 use self::cable::{draw_cable, jack_at, JackPos};
-use self::node_view::draw_node;
+use self::knob::{KnobScale, rotary_knob, wave_selector};
+use self::node_view::show_node;
+
+const NODE_HEADER_HEIGHT: f32 = 24.0;
 
 /// Patch editor widget.
 pub struct PatchEditor {
@@ -76,25 +80,39 @@ impl PatchEditor {
         self.jack_cache.clear();
         let pointer = ui.input(|i| i.pointer.interact_pos());
         let mut all_jacks: Vec<JackPos> = Vec::new();
+        let params = patch.compiled.as_ref().map(|p| p.params.clone());
 
         let nodes: Vec<_> = patch.graph.nodes().to_vec();
         for node in &nodes {
             let pos = patch.position(node.id);
             let selected = patch.selected == Some(node.id);
-            let layout = draw_node(ui, node, pos, selected);
+            let layout = show_node(
+                ui,
+                node,
+                pos,
+                selected,
+                params.as_ref(),
+            );
             self.jack_cache.insert(node.id, layout.jacks.clone());
             all_jacks.extend(layout.jacks);
 
+            let header_rect = egui::Rect::from_min_size(
+                layout.rect.min,
+                egui::vec2(layout.rect.width(), NODE_HEADER_HEIGHT),
+            );
+
             if response.clicked() {
-                if layout.rect.contains(pointer.unwrap_or(egui::Pos2::ZERO)) {
+                if header_rect.contains(pointer.unwrap_or(egui::Pos2::ZERO)) {
                     patch.selected = Some(node.id);
-                } else if patch.selected.is_some() {
+                } else if !layout.rect.contains(pointer.unwrap_or(egui::Pos2::ZERO))
+                    && patch.selected.is_some()
+                {
                     patch.selected = None;
                 }
             }
 
             if response.drag_started()
-                && layout.rect.contains(pointer.unwrap_or(egui::Pos2::ZERO))
+                && header_rect.contains(pointer.unwrap_or(egui::Pos2::ZERO))
             {
                 self.drag_node = Some(node.id);
                 self.drag_offset = pointer.unwrap() - pos;
@@ -139,11 +157,10 @@ impl PatchEditor {
         patch: &PatchState,
         jacks: &[JackPos],
     ) {
-        for (idx, edge) in patch.graph.edges().iter().enumerate() {
+        for edge in patch.graph.edges() {
             let from = jacks.iter().find(|j| j.port == edge.from);
             let to = jacks.iter().find(|j| j.port == edge.to);
             if let (Some(from), Some(to)) = (from, to) {
-                let cable_rect = egui::Rect::from_two_pos(from.center, to.center);
                 draw_cable(
                     painter,
                     from.center,
@@ -152,16 +169,6 @@ impl PatchEditor {
                     2.5,
                     false,
                 );
-                if patch.selected.is_none() {
-                    if let Some(pointer) = painter.ctx().input(|i| i.pointer.interact_pos()) {
-                        if pointer.distance(cable_rect.center()) < 12.0
-                            && painter.ctx().input(|i| i.pointer.secondary_clicked())
-                        {
-                            // handled below via edge index stored — use secondary on canvas
-                            let _ = idx;
-                        }
-                    }
-                }
             }
         }
     }
@@ -219,7 +226,7 @@ impl PatchEditor {
 
     fn param_panel(&self, ui: &mut egui::Ui, patch: &PatchState) {
         let Some(selected) = patch.selected else {
-            ui.label("选中节点以编辑参数。");
+            ui.label("选中节点标题栏以编辑；VCO 旋钮可直接在模块上拖动。");
             return;
         };
         let Some(node) = patch.graph.node(selected) else {
@@ -230,38 +237,64 @@ impl PatchEditor {
             return;
         };
 
-        ui.heading(format!("{} 参数", kind_label(node.kind)));
+        if node.kind == NodeKind::Vco {
+            ui.label(
+                egui::RichText::new("VCO：拖动 FREQ / AMP 旋钮，或点击波形按钮。双击旋钮恢复默认。")
+                    .color(egui::Color32::from_gray(160)),
+            );
+            ui.horizontal(|ui| {
+                if let Some(freq) = compiled.params.get(selected, ParamId::new(0)) {
+                    let mut v = freq.value();
+                    if rotary_knob(
+                        ui,
+                        egui::Id::new(("panel_knob", selected.raw(), 0u32)),
+                        "频率",
+                        &mut v,
+                        20.0..=2000.0,
+                        KnobScale::Logarithmic,
+                    )
+                    .changed()
+                    {
+                        freq.set(v);
+                    }
+                }
+                if let Some(amp) = compiled.params.get(selected, ParamId::new(1)) {
+                    let mut v = amp.value();
+                    if rotary_knob(
+                        ui,
+                        egui::Id::new(("panel_knob", selected.raw(), 1u32)),
+                        "振幅",
+                        &mut v,
+                        0.0..=1.0,
+                        KnobScale::Linear,
+                    )
+                    .changed()
+                    {
+                        amp.set(v);
+                    }
+                }
+                if let Some(wave) = compiled.params.get(selected, ParamId::new(2)) {
+                    let mut v = wave.value();
+                    wave_selector(ui, &mut v);
+                    if (v - wave.value()).abs() > f32::EPSILON {
+                        wave.set(v);
+                    }
+                }
+            });
+            return;
+        }
 
+        ui.heading(format!("{} 参数", kind_label(node.kind)));
         let param_count = node.kind.port_counts().params;
         for raw in 0..param_count {
-            let param = waver_core::ParamId::new(raw);
+            let param = ParamId::new(raw);
             let Some(cell) = compiled.params.get(selected, param) else {
                 continue;
             };
             let label = param_label(node.kind, param);
-            if node.kind == NodeKind::Vco && raw == 2 {
-                ui.horizontal(|ui| {
-                    ui.label(label);
-                    let mut wave = cell.value().round() as i32;
-                    ui.selectable_value(&mut wave, 0, "正弦");
-                    ui.selectable_value(&mut wave, 1, "锯齿");
-                    ui.selectable_value(&mut wave, 2, "方波");
-                    ui.selectable_value(&mut wave, 3, "三角");
-                    cell.set(wave as f32);
-                });
-            } else if node.kind == NodeKind::Vco && raw == 0 {
-                let mut freq = cell.value();
-                ui.add(
-                    egui::Slider::new(&mut freq, 20.0..=2000.0)
-                        .logarithmic(true)
-                        .text(label),
-                );
-                cell.set(freq);
-            } else {
-                let mut value = cell.value();
-                ui.add(egui::Slider::new(&mut value, 0.0..=1.0).text(label));
-                cell.set(value);
-            }
+            let mut value = cell.value();
+            ui.add(egui::Slider::new(&mut value, 0.0..=1.0).text(label));
+            cell.set(value);
         }
     }
 }
