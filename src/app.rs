@@ -1,30 +1,11 @@
 //! Status shell + patch node editor.
 
-use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 
 use eframe::egui;
 use rtrb::Producer;
 use waver_core::{EngineStatus, RtCommand};
-
-// #region agent log
-fn waver_dbg(hypothesis_id: &str, location: &str, message: &str, data: &str) {
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let line = format!(
-        "{{\"id\":\"log_{ts}_{hypothesis_id}\",\"timestamp\":{ts},\"location\":{location:?},\"message\":{message:?},\"data\":{data},\"hypothesisId\":{hypothesis_id:?}}}\n"
-    );
-    eprintln!("WAVER_DBG {hypothesis_id} {location} {message} {data}");
-    for path in ["/opt/cursor/logs/debug.log", "/tmp/waver_ui_debug.log"] {
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _ = f.write_all(line.as_bytes());
-        }
-    }
-}
-// #endregion
 
 use crate::editor::PatchEditor;
 use crate::patch_state::PatchState;
@@ -78,55 +59,18 @@ impl WaverApp {
             self.bootstrapped = true;
         }
 
-        // #region agent log
-        let parent_avail = ui.available_rect_before_wrap();
-        let parent_max = ui.max_rect();
-        static APP_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let app_frame = APP_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // #endregion
+        // Panel::show on the App::ui root — do NOT nest CentralPanel (shrinks layout /
+        // steals pointer layers). Right panel first so the remaining Ui is the editor.
+        egui::Panel::right("status_panel")
+            .default_size(220.0)
+            .show(ui, |ui| {
+                self.status_panel(ui);
+            });
 
-        // Use an in-ui split instead of nesting CentralPanel/SidePanel inside App::ui
-        // (nested panels steal layers and confuse pointer ownership).
-        let status_width = 220.0;
-        let full = ui.available_rect_before_wrap();
-        let main_max = (full.width() - status_width - 8.0).max(200.0);
-
-        ui.horizontal(|ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(main_max, ui.available_height()),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    // #region agent log
-                    if app_frame < 5 {
-                        let central_avail = ui.available_rect_before_wrap();
-                        waver_dbg(
-                            "E",
-                            "app.rs:ui",
-                            "panel_nesting",
-                            &format!(
-                                "{{\"frame\":{app_frame},\"parent_avail\":[{:.1},{:.1},{:.1},{:.1}],\"parent_max\":[{:.1},{:.1},{:.1},{:.1}],\"central_avail\":[{:.1},{:.1},{:.1},{:.1}],\"layout\":\"split\"}}",
-                                parent_avail.min.x, parent_avail.min.y, parent_avail.max.x, parent_avail.max.y,
-                                parent_max.min.x, parent_max.min.y, parent_max.max.x, parent_max.max.y,
-                                central_avail.min.x, central_avail.min.y, central_avail.max.x, central_avail.max.y
-                            ),
-                        );
-                    }
-                    // #endregion
-                    ui.heading("waver · 节点编辑器");
-                    ui.label("拖标题移动 · 拖旋钮调参 · OUT→IN 连线 · 悬停线后 Delete/工具栏删除");
-                    ui.separator();
-                    self.editor.ui(ui, &mut self.patch, &mut self.commands);
-                },
-            );
-            ui.separator();
-            ui.allocate_ui_with_layout(
-                egui::vec2(status_width, ui.available_height()),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    self.status_panel(ui);
-                },
-            );
-        });
+        ui.heading("waver · 节点编辑器");
+        ui.label("拖标题移动 · 拖旋钮调参 · OUT→IN 连线 · 悬停线后 Delete/工具栏删除");
+        ui.separator();
+        self.editor.ui(ui, &mut self.patch, &mut self.commands);
     }
 
     fn status_panel(&mut self, ui: &mut egui::Ui) {
