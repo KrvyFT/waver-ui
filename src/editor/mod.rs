@@ -5,12 +5,54 @@ mod knob;
 mod node_view;
 
 use std::collections::HashMap;
+use std::io::Write;
 
 use eframe::egui;
 use rtrb::Producer;
 use waver_core::{NodeId, NodeKind, ParamId, RtCommand};
 
 use crate::patch_state::PatchState;
+
+// #region agent log
+fn waver_dbg(hypothesis_id: &str, location: &str, message: &str, data: &str) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let line = format!(
+        "{{\"id\":\"log_{ts}_{hypothesis_id}\",\"timestamp\":{ts},\"location\":{location:?},\"message\":{message:?},\"data\":{data},\"hypothesisId\":{hypothesis_id:?}}}\n"
+    );
+    eprintln!("WAVER_DBG {hypothesis_id} {location} {message} {data}");
+    for path in ["/opt/cursor/logs/debug.log", "/tmp/waver_ui_debug.log"] {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = f.write_all(line.as_bytes());
+        }
+    }
+}
+
+fn dbg_frame() -> u64 {
+    static F: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    F.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn drag_tag(drag: &Option<DragKind>) -> String {
+    match drag {
+        None => "None".into(),
+        Some(DragKind::Node { id, grab_offset }) => {
+            format!("Node(id={},ox={:.1},oy={:.1})", id.raw(), grab_offset.x, grab_offset.y)
+        }
+        Some(DragKind::Knob { node, param, last_pointer }) => {
+            format!(
+                "Knob(node={},param={},lx={:.1},ly={:.1})",
+                node.raw(),
+                param,
+                last_pointer.x,
+                last_pointer.y
+            )
+        }
+    }
+}
+// #endregion
 
 pub use cable::CableState;
 
@@ -29,6 +71,17 @@ enum DragKind {
         last_pointer: egui::Pos2,
     },
 }
+
+// #region agent log
+struct PointerDbg {
+    frame: u64,
+    interact_pos: Option<egui::Pos2>,
+    hover_pos: Option<egui::Pos2>,
+    area_shown: bool,
+    area_hovered: bool,
+    area_clicked: bool,
+}
+// #endregion
 
 /// Patch editor widget.
 pub struct PatchEditor {
@@ -78,14 +131,48 @@ impl PatchEditor {
             if ui.button("删除选中").clicked() && patch.remove_selected() {
                 patch.recompile(commands);
             }
-            if ui.button("删除连线").clicked() {
+            let del_cable = ui.button("删除连线");
+            // #region agent log
+            {
+                static TB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let n = TB.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n < 3 {
+                    waver_dbg(
+                        "F",
+                        "editor/mod.rs:toolbar",
+                        "delete_cable_btn_rect",
+                        &format!(
+                            "{{\"rect\":[{:.1},{:.1},{:.1},{:.1}]}}",
+                            del_cable.rect.min.x,
+                            del_cable.rect.min.y,
+                            del_cable.rect.max.x,
+                            del_cable.rect.max.y
+                        ),
+                    );
+                }
+            }
+            // #endregion
+            if del_cable.clicked() {
+                let edge_len = patch.graph.edges().len();
                 let idx = self.hovered_cable.or_else(|| {
-                    if patch.graph.edges().len() == 1 {
+                    if edge_len == 1 {
                         Some(0)
                     } else {
                         None
                     }
                 });
+                // #region agent log
+                waver_dbg(
+                    "F",
+                    "editor/mod.rs:toolbar_delete",
+                    "toolbar_delete_cable_clicked",
+                    &format!(
+                        "{{\"hovered_cable\":{},\"edge_len\":{edge_len},\"idx\":{}}}",
+                        self.hovered_cable.map(|i| i.to_string()).unwrap_or_else(|| "null".into()),
+                        idx.map(|i| i.to_string()).unwrap_or_else(|| "null".into())
+                    ),
+                );
+                // #endregion
                 if let Some(idx) = idx {
                     if patch.disconnect_edge(idx) {
                         self.hovered_cable = None;
@@ -116,6 +203,9 @@ impl PatchEditor {
         let pointer = response.interact_pointer_pos().or_else(|| {
             ui.input(|i| i.pointer.hover_pos())
         });
+        let interact_pos = response.interact_pointer_pos();
+        let hover_pos = ui.input(|i| i.pointer.hover_pos());
+        let frame = dbg_frame();
 
         // Rebuild geometry for this frame.
         self.jack_cache.clear();
@@ -130,9 +220,24 @@ impl PatchEditor {
             // Keep nodes inside canvas on first layout if needed.
             let pos = {
                 let mut p = pos;
-                if p.x < canvas_rect.left() || p.y < canvas_rect.top() {
+                let would_reset = p.x < canvas_rect.left() || p.y < canvas_rect.top();
+                if would_reset {
+                    let old = p;
                     p = canvas_rect.min
                         + egui::vec2(30.0 + node.id.raw() as f32 * 280.0, 40.0);
+                    // #region agent log
+                    waver_dbg(
+                        "A",
+                        "editor/mod.rs:layout_reset",
+                        "position_reset_branch",
+                        &format!(
+                            "{{\"frame\":{frame},\"id\":{},\"old\":[{:.1},{:.1}],\"new\":[{:.1},{:.1}],\"canvas\":[{:.1},{:.1},{:.1},{:.1}]}}",
+                            node.id.raw(),
+                            old.x, old.y, p.x, p.y,
+                            canvas_rect.min.x, canvas_rect.min.y, canvas_rect.max.x, canvas_rect.max.y
+                        ),
+                    );
+                    // #endregion
                     patch.set_position(node.id, p);
                 }
                 p
@@ -149,21 +254,70 @@ impl PatchEditor {
             self.jack_cache.extend(jacks);
         }
 
-        // Hovered cable highlight + draw.
+        // #region agent log
+        if frame < 5 {
+            let nodes_json: String = self
+                .node_rects
+                .iter()
+                .map(|(id, r)| {
+                    format!(
+                        "{{\"id\":{},\"rect\":[{:.1},{:.1},{:.1},{:.1}],\"header\":[{:.1},{:.1}],\"amp_knob\":[{:.1},{:.1}],\"freq_knob\":[{:.1},{:.1}]}}",
+                        id.raw(),
+                        r.min.x, r.min.y, r.max.x, r.max.y,
+                        r.min.x + r.width() * 0.5, r.min.y + 13.0,
+                        r.left() + 92.0, r.top() + 64.0,
+                        r.left() + 36.0, r.top() + 64.0
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            let jacks_json: String = self
+                .jack_cache
+                .iter()
+                .map(|j| {
+                    format!(
+                        "{{\"out\":{},\"c\":[{:.1},{:.1}]}}",
+                        j.is_output, j.center.x, j.center.y
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            waver_dbg(
+                "E",
+                "editor/mod.rs:layout_dump",
+                "canvas_and_nodes",
+                &format!(
+                    "{{\"frame\":{frame},\"canvas\":[{:.1},{:.1},{:.1},{:.1}],\"nodes\":[{nodes_json}],\"jacks\":[{jacks_json}]}}",
+                    canvas_rect.min.x, canvas_rect.min.y, canvas_rect.max.x, canvas_rect.max.y
+                ),
+            );
+        }
+        // #endregion
+
+        // Hovered cable: sticky index kept for Delete/toolbar, but highlight + floating
+        // button only while the pointer is actually near a cable this frame.
         let hovered_now = pointer.and_then(|p| nearest_cable_index(p, patch, &self.jack_cache));
-        if hovered_now.is_some() {
-            self.hovered_cable = hovered_now;
+        if let Some(idx) = hovered_now {
+            self.hovered_cable = Some(idx);
             ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
-        } else if pointer.is_some() {
-            // Clear hover when pointer is on canvas but not near a cable.
-            if pointer.is_some_and(|p| canvas_rect.contains(p)) {
-                let over_node = self.node_rects.values().any(|r| r.contains(pointer.unwrap()));
-                if !over_node {
+        } else if let Some(p) = pointer {
+            if canvas_rect.contains(p) {
+                // Leaving the cable path clears sticky hover so the floating delete
+                // Area cannot linger over nodes/knobs (was area_shown:true during drags).
+                let still_near_sticky = self.hovered_cable.and_then(|idx| {
+                    let edge = patch.graph.edges().get(idx)?;
+                    let from = self.jack_cache.iter().find(|j| j.port == edge.from)?;
+                    let to = self.jack_cache.iter().find(|j| j.port == edge.to)?;
+                    let d = cable_distance(p, from.center, to.center);
+                    Some(d <= CABLE_HIT_RADIUS * 2.5)
+                });
+                if still_near_sticky != Some(true) {
                     self.hovered_cable = None;
                 }
             }
         }
-        let hovered_cable = self.hovered_cable;
+        let sticky_cable = self.hovered_cable;
+        let near_cable = hovered_now;
         for (idx, edge) in patch.graph.edges().iter().enumerate() {
             let Some(from) = self.jack_cache.iter().find(|j| j.port == edge.from) else {
                 continue;
@@ -171,7 +325,7 @@ impl PatchEditor {
             let Some(to) = self.jack_cache.iter().find(|j| j.port == edge.to) else {
                 continue;
             };
-            let hot = hovered_cable == Some(idx);
+            let hot = near_cable == Some(idx);
             draw_cable(
                 &painter,
                 from.center,
@@ -186,24 +340,32 @@ impl PatchEditor {
             );
         }
 
-        // Explicit delete-cable control when hovering (more reliable than OS-eaten right-click).
-        if let Some(idx) = hovered_cable {
+        // Floating delete only while pointer is near a cable — never while sticky-only
+        // over a module (that overlay stole/confused knob and header hits).
+        let mut area_shown = false;
+        let mut area_clicked = false;
+        let mut area_hovered = false;
+        if let Some(idx) = near_cable {
+            area_shown = true;
+            // Anchor away from the pointer so the button does not cover the cable hit.
+            let anchor = pointer.unwrap_or(canvas_rect.center()) + egui::vec2(18.0, -36.0);
             egui::Area::new(egui::Id::new("cable_delete_hint"))
-                .fixed_pos(pointer.unwrap_or(canvas_rect.center()) + egui::vec2(12.0, 12.0))
+                .fixed_pos(anchor)
                 .order(egui::Order::Foreground)
                 .show(ui.ctx(), |ui| {
-                    if ui
-                        .add(
-                            egui::Button::new("删除连线")
-                                .fill(egui::Color32::from_rgb(180, 60, 50)),
-                        )
-                        .clicked()
-                        && patch.disconnect_edge(idx)
-                    {
+                    let resp = ui.add(
+                        egui::Button::new("删除连线")
+                            .fill(egui::Color32::from_rgb(180, 60, 50)),
+                    );
+                    area_hovered = resp.hovered() || resp.contains_pointer();
+                    area_clicked = resp.clicked();
+                    if resp.clicked() && patch.disconnect_edge(idx) {
+                        self.hovered_cable = None;
                         patch.recompile(commands);
                     }
                 });
         }
+        let hovered_cable = sticky_cable.or(near_cable);
 
         // Live cable preview.
         if let CableState::Dragging { from_pos, .. } = &self.cable {
@@ -220,7 +382,23 @@ impl PatchEditor {
         }
 
         // --- Interaction (manual) ---
-        self.handle_pointer(ui, &response, patch, commands, pointer, hovered_cable, canvas_rect);
+        self.handle_pointer(
+            ui,
+            &response,
+            patch,
+            commands,
+            pointer,
+            hovered_cable,
+            canvas_rect,
+            PointerDbg {
+                frame,
+                interact_pos,
+                hover_pos,
+                area_shown,
+                area_hovered,
+                area_clicked,
+            },
+        );
 
         ui.add_space(4.0);
         ui.separator();
@@ -237,11 +415,8 @@ impl PatchEditor {
         pointer: Option<egui::Pos2>,
         hovered_cable: Option<usize>,
         canvas_rect: egui::Rect,
+        dbg: PointerDbg,
     ) {
-        let Some(pointer) = pointer else {
-            return;
-        };
-
         let primary_down = ui.input(|i| i.pointer.primary_down());
         let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
         let primary_released = ui.input(|i| i.pointer.primary_released());
@@ -250,11 +425,87 @@ impl PatchEditor {
         let delete_key = ui.input(|i| {
             i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)
         });
+        let decidedly = ui.input(|i| i.pointer.is_decidedly_dragging());
+        let dragged_id = ui.ctx().dragged_id().map(|id| format!("{id:?}"));
+
+        let interacting = primary_down
+            || primary_pressed
+            || primary_released
+            || delete_key
+            || secondary_clicked
+            || self.drag.is_some()
+            || dbg.area_clicked;
+        // #region agent log
+        if interacting {
+            let pjson = pointer
+                .map(|p| format!("[{:.1},{:.1}]", p.x, p.y))
+                .unwrap_or_else(|| "null".into());
+            let ij = dbg
+                .interact_pos
+                .map(|p| format!("[{:.1},{:.1}]", p.x, p.y))
+                .unwrap_or_else(|| "null".into());
+            let hj = dbg
+                .hover_pos
+                .map(|p| format!("[{:.1},{:.1}]", p.x, p.y))
+                .unwrap_or_else(|| "null".into());
+            waver_dbg(
+                "C",
+                "editor/mod.rs:handle_pointer",
+                "pointer_frame",
+                &format!(
+                    "{{\"frame\":{},\"pointer\":{pjson},\"interact_pos\":{ij},\"hover_pos\":{hj},\"primary_pressed\":{primary_pressed},\"primary_down\":{primary_down},\"primary_released\":{primary_released},\"delta\":[{:.1},{:.1}],\"resp_dragged\":{},\"resp_contains\":{},\"resp_hovered\":{},\"decidedly_dragging\":{decidedly},\"drag\":\"{}\",\"hovered_cable\":{},\"area_shown\":{},\"area_hovered\":{},\"area_clicked\":{},\"dragged_id\":{},\"canvas\":[{:.1},{:.1},{:.1},{:.1}]}}",
+                    dbg.frame,
+                    pointer_delta.x, pointer_delta.y,
+                    response.dragged(),
+                    response.contains_pointer(),
+                    response.hovered(),
+                    drag_tag(&self.drag).replace('"', "'"),
+                    hovered_cable.map(|i| i.to_string()).unwrap_or_else(|| "null".into()),
+                    dbg.area_shown,
+                    dbg.area_hovered,
+                    dbg.area_clicked,
+                    dragged_id
+                        .map(|s| format!("\"{}\"", s.replace('"', "'")))
+                        .unwrap_or_else(|| "null".into()),
+                    canvas_rect.min.x, canvas_rect.min.y, canvas_rect.max.x, canvas_rect.max.y
+                ),
+            );
+        }
+        // #endregion
+
+        let Some(pointer) = pointer else {
+            // #region agent log
+            if primary_pressed || primary_down {
+                waver_dbg(
+                    "C",
+                    "editor/mod.rs:handle_pointer",
+                    "pointer_none_early_return",
+                    &format!(
+                        "{{\"frame\":{},\"primary_pressed\":{primary_pressed},\"primary_down\":{primary_down}}}",
+                        dbg.frame
+                    ),
+                );
+            }
+            // #endregion
+            return;
+        };
 
         // Double-click near a cable also deletes it.
         if response.double_clicked() {
+            // #region agent log
+            waver_dbg(
+                "F",
+                "editor/mod.rs:handle_pointer",
+                "double_click_delete",
+                &format!(
+                    "{{\"hovered_cable\":{}}}",
+                    hovered_cable.map(|i| i.to_string()).unwrap_or_else(|| "null".into())
+                ),
+            );
+            // #endregion
             if let Some(idx) = hovered_cable {
                 if patch.disconnect_edge(idx) {
+                    self.hovered_cable = None;
                     patch.recompile(commands);
                 }
                 self.drag = None;
@@ -263,13 +514,35 @@ impl PatchEditor {
         }
 
         if (secondary_clicked || delete_key) && hovered_cable.is_some() {
+            // #region agent log
+            waver_dbg(
+                "F",
+                "editor/mod.rs:handle_pointer",
+                "delete_key_or_rmb",
+                &format!(
+                    "{{\"delete_key\":{delete_key},\"secondary_clicked\":{secondary_clicked},\"hovered_cable\":{},\"runId\":\"post-fix\"}}",
+                    hovered_cable.map(|i| i.to_string()).unwrap_or_else(|| "null".into())
+                ),
+            );
+            // #endregion
             if let Some(idx) = hovered_cable {
                 if patch.disconnect_edge(idx) {
+                    self.hovered_cable = None;
                     patch.recompile(commands);
                 }
             }
             self.drag = None;
             return;
+        }
+        if delete_key && hovered_cable.is_none() {
+            // #region agent log
+            waver_dbg(
+                "F",
+                "editor/mod.rs:handle_pointer",
+                "delete_key_no_hovered_cable",
+                &format!("{{\"edge_len\":{}}}", patch.graph.edges().len()),
+            );
+            // #endregion
         }
         if secondary_clicked {
             self.cable.cancel();
@@ -285,20 +558,58 @@ impl PatchEditor {
                 .copied()
                 .find(|j| j.center.distance(pointer) <= JACK_HIT_RADIUS)
             {
+                // #region agent log
+                waver_dbg(
+                    "D",
+                    "editor/mod.rs:handle_pointer",
+                    "press_jack",
+                    &format!(
+                        "{{\"pointer\":[{:.1},{:.1}],\"jack\":[{:.1},{:.1}],\"is_output\":{}}}",
+                        pointer.x, pointer.y, jack.center.x, jack.center.y, jack.is_output
+                    ),
+                );
+                // #endregion
                 self.on_jack_click(patch, commands, jack);
                 self.drag = None;
                 return;
             }
             if let Some((id, hit, rect)) = top_hit(patch, &self.node_rects, pointer) {
                 patch.selected = Some(id);
+                let hit_s = match hit {
+                    NodeHit::Header => "Header".into(),
+                    NodeHit::Body => "Body".into(),
+                    NodeHit::Knob { param } => format!("Knob({param})"),
+                    NodeHit::Wave { index } => format!("Wave({index})"),
+                };
+                // #region agent log
+                waver_dbg(
+                    "D",
+                    "editor/mod.rs:handle_pointer",
+                    "press_node_hit",
+                    &format!(
+                        "{{\"id\":{},\"hit\":\"{hit_s}\",\"pointer\":[{:.1},{:.1}],\"rect\":[{:.1},{:.1},{:.1},{:.1}],\"area_shown\":{},\"runId\":\"post-fix\"}}",
+                        id.raw(),
+                        pointer.x, pointer.y,
+                        rect.min.x, rect.min.y, rect.max.x, rect.max.y,
+                        dbg.area_shown
+                    ),
+                );
+                // #endregion
                 match hit {
-                    NodeHit::Header | NodeHit::Body => {
+                    // Only the title bar moves modules — Body used to steal knob misses.
+                    NodeHit::Header => {
+                        self.hovered_cable = None;
                         self.drag = Some(DragKind::Node {
                             id,
                             grab_offset: pointer - rect.min,
                         });
                     }
+                    NodeHit::Body => {
+                        self.hovered_cable = None;
+                        self.drag = None;
+                    }
                     NodeHit::Knob { param } => {
+                        self.hovered_cable = None;
                         self.drag = Some(DragKind::Knob {
                             node: id,
                             param,
@@ -306,6 +617,7 @@ impl PatchEditor {
                         });
                     }
                     NodeHit::Wave { index } => {
+                        self.hovered_cable = None;
                         if let Some(compiled) = &patch.compiled {
                             if let Some(cell) = compiled.params.get(id, ParamId::new(2)) {
                                 cell.set(index as f32);
@@ -316,8 +628,32 @@ impl PatchEditor {
                 }
                 return;
             }
+            // #region agent log
+            let rects: String = self
+                .node_rects
+                .iter()
+                .map(|(id, r)| {
+                    format!(
+                        "{{\"id\":{},\"r\":[{:.1},{:.1},{:.1},{:.1}]}}",
+                        id.raw(),
+                        r.min.x, r.min.y, r.max.x, r.max.y
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            waver_dbg(
+                "D",
+                "editor/mod.rs:handle_pointer",
+                "press_empty_canvas",
+                &format!(
+                    "{{\"pointer\":[{:.1},{:.1}],\"area_shown\":{},\"node_rects\":[{rects}],\"runId\":\"post-fix\"}}",
+                    pointer.x, pointer.y, dbg.area_shown
+                ),
+            );
+            // #endregion
             // Empty canvas press
             patch.selected = None;
+            self.hovered_cable = None;
             self.cable.cancel();
             self.drag = None;
             return;
@@ -343,6 +679,22 @@ impl PatchEditor {
                             (canvas_rect.bottom() - size.y).max(canvas_rect.top()),
                         ),
                     );
+                    // #region agent log
+                    waver_dbg(
+                        "A",
+                        "editor/mod.rs:handle_pointer",
+                        "drag_node_update",
+                        &format!(
+                            "{{\"id\":{},\"pointer\":[{:.1},{:.1}],\"grab\":[{:.1},{:.1}],\"next\":[{:.1},{:.1}],\"clamped\":[{:.1},{:.1}],\"would_reset\":{}}}",
+                            id.raw(),
+                            pointer.x, pointer.y,
+                            grab_offset.x, grab_offset.y,
+                            next.x, next.y,
+                            clamped.x, clamped.y,
+                            clamped.x < canvas_rect.left() || clamped.y < canvas_rect.top()
+                        ),
+                    );
+                    // #endregion
                     patch.set_position(id, clamped);
                     let _ = pointer_delta;
                     let _ = response;
@@ -353,10 +705,13 @@ impl PatchEditor {
                     param,
                     last_pointer,
                 }) => {
+                    let mut had_cell = false;
                     if let Some(compiled) = &patch.compiled {
                         if let Some(cell) = compiled.params.get(node, ParamId::new(param)) {
+                            had_cell = true;
                             let dy = last_pointer.y - pointer.y;
-                            let mut v = cell.value();
+                            let before = cell.value();
+                            let mut v = before;
                             if param == 0 {
                                 let log_v = v.max(20.0).ln();
                                 v = (log_v + dy * 0.012).exp().clamp(20.0, 2000.0);
@@ -364,7 +719,33 @@ impl PatchEditor {
                                 v = (v + dy * 0.006).clamp(0.0, 1.0);
                             }
                             cell.set(v);
+                            // #region agent log
+                            waver_dbg(
+                                "D",
+                                "editor/mod.rs:handle_pointer",
+                                "drag_knob_update",
+                                &format!(
+                                    "{{\"node\":{},\"param\":{param},\"dy\":{dy:.2},\"before\":{before:.4},\"after\":{v:.4},\"had_cell\":true,\"pointer\":[{:.1},{:.1}],\"runId\":\"post-fix\"}}",
+                                    node.raw(),
+                                    pointer.x, pointer.y
+                                ),
+                            );
+                            // #endregion
                         }
+                    }
+                    if !had_cell {
+                        // #region agent log
+                        waver_dbg(
+                            "D",
+                            "editor/mod.rs:handle_pointer",
+                            "drag_knob_no_cell",
+                            &format!(
+                                "{{\"node\":{},\"param\":{param},\"compiled\":{}}}",
+                                node.raw(),
+                                patch.compiled.is_some()
+                            ),
+                        );
+                        // #endregion
                     }
                     self.drag = Some(DragKind::Knob {
                         node,

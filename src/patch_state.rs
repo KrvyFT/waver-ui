@@ -1,7 +1,26 @@
 //! Patch graph state, layout, and compile → audio queue.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::Arc;
+
+// #region agent log
+fn waver_dbg(hypothesis_id: &str, location: &str, message: &str, data: &str) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let line = format!(
+        "{{\"id\":\"log_{ts}_{hypothesis_id}\",\"timestamp\":{ts},\"location\":{location:?},\"message\":{message:?},\"data\":{data},\"hypothesisId\":{hypothesis_id:?}}}\n"
+    );
+    eprintln!("WAVER_DBG {hypothesis_id} {location} {message} {data}");
+    for path in ["/opt/cursor/logs/debug.log", "/tmp/waver_ui_debug.log"] {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = f.write_all(line.as_bytes());
+        }
+    }
+}
+// #endregion
 
 use eframe::egui;
 use rtrb::Producer;
@@ -87,7 +106,20 @@ impl PatchState {
     }
 
     pub fn disconnect_edge(&mut self, index: usize) -> bool {
-        self.graph.disconnect_edge(index)
+        let before = self.graph.edges().len();
+        let ok = self.graph.disconnect_edge(index);
+        // #region agent log
+        waver_dbg(
+            "F",
+            "patch_state.rs:disconnect_edge",
+            "disconnect_edge",
+            &format!(
+                "{{\"index\":{index},\"ok\":{ok},\"edges_before\":{before},\"edges_after\":{}}}",
+                self.graph.edges().len()
+            ),
+        );
+        // #endregion
+        ok
     }
 
     pub fn position(&self, id: NodeId) -> egui::Pos2 {
@@ -98,6 +130,25 @@ impl PatchState {
     }
 
     pub fn set_position(&mut self, id: NodeId, pos: egui::Pos2) {
+        // #region agent log
+        let prev = self.positions.get(&id).copied();
+        let changed = prev.is_none_or(|p| (p.x - pos.x).abs() > 0.05 || (p.y - pos.y).abs() > 0.05);
+        if changed {
+            waver_dbg(
+                "A",
+                "patch_state.rs:set_position",
+                "set_position",
+                &format!(
+                    "{{\"id\":{},\"prev\":[{:.1},{:.1}],\"next\":[{:.1},{:.1}]}}",
+                    id.raw(),
+                    prev.map(|p| p.x).unwrap_or(f32::NAN),
+                    prev.map(|p| p.y).unwrap_or(f32::NAN),
+                    pos.x,
+                    pos.y
+                ),
+            );
+        }
+        // #endregion
         self.positions.insert(id, pos);
     }
 

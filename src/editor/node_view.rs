@@ -30,22 +30,27 @@ pub fn draw_node_visual(
     }
 }
 
+/// Hit radius for on-module rotary knobs (larger than visual radius for easier grabs).
+pub const KNOB_HIT_RADIUS: f32 = 28.0;
+
 /// Hit-test pointer against a node's interactive regions.
+///
+/// Knob / wave targets are tested before the header so a slightly-high amp grab
+/// is not stolen by the title bar, and Body never starts a module drag.
 pub fn hit_test_node(kind: NodeKind, rect: egui::Rect, pointer: egui::Pos2) -> Option<NodeHit> {
     if !rect.contains(pointer) {
         return None;
     }
-    let header = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), NODE_HEADER_H));
-    if header.contains(pointer) {
-        return Some(NodeHit::Header);
-    }
     if kind == NodeKind::Vco {
         let freq_c = knob_center(rect, 0);
         let amp_c = knob_center(rect, 1);
-        if pointer.distance(freq_c) <= 22.0 {
-            return Some(NodeHit::Knob { param: 0 });
-        }
-        if pointer.distance(amp_c) <= 22.0 {
+        // Prefer the nearer knob when both circles overlap the pointer.
+        let d_freq = pointer.distance(freq_c);
+        let d_amp = pointer.distance(amp_c);
+        if d_freq <= KNOB_HIT_RADIUS || d_amp <= KNOB_HIT_RADIUS {
+            if d_freq <= d_amp {
+                return Some(NodeHit::Knob { param: 0 });
+            }
             return Some(NodeHit::Knob { param: 1 });
         }
         for i in 0..4 {
@@ -53,6 +58,10 @@ pub fn hit_test_node(kind: NodeKind, rect: egui::Rect, pointer: egui::Pos2) -> O
                 return Some(NodeHit::Wave { index: i });
             }
         }
+    }
+    let header = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), NODE_HEADER_H));
+    if header.contains(pointer) {
+        return Some(NodeHit::Header);
     }
     Some(NodeHit::Body)
 }
@@ -339,5 +348,41 @@ fn kind_label(kind: NodeKind) -> &'static str {
         NodeKind::Mixer => "Mixer",
         NodeKind::Silence => "Silence",
         NodeKind::Delay => "Delay",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn amp_knob_hit_not_body_or_header() {
+        let rect = egui::Rect::from_min_size(egui::pos2(161.3, 224.7), VCO_SIZE);
+        let amp = knob_center(rect, 1);
+        match hit_test_node(NodeKind::Vco, rect, amp) {
+            Some(NodeHit::Knob { param: 1 }) => {}
+            other => panic!("expected Amp knob, got {other:?}"),
+        }
+        // Slightly above amp (toward header) should still prefer knob over header.
+        let near_top = egui::pos2(amp.x, amp.y - 20.0);
+        match hit_test_node(NodeKind::Vco, rect, near_top) {
+            Some(NodeHit::Knob { param: 1 }) => {}
+            other => panic!("expected Amp knob near top edge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn header_hit_only_on_title_bar() {
+        let rect = egui::Rect::from_min_size(egui::pos2(40.0, 160.0), VCO_SIZE);
+        let header_pt = egui::pos2(rect.center().x, rect.top() + 10.0);
+        assert!(matches!(
+            hit_test_node(NodeKind::Vco, rect, header_pt),
+            Some(NodeHit::Header)
+        ));
+        let body_pt = egui::pos2(rect.right() - 30.0, rect.top() + 50.0);
+        assert!(matches!(
+            hit_test_node(NodeKind::Vco, rect, body_pt),
+            Some(NodeHit::Body)
+        ));
     }
 }

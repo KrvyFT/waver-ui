@@ -1,6 +1,26 @@
 //! Rotary knob widgets for modular synth parameter control.
 
+use std::io::Write;
+
 use eframe::egui;
+
+// #region agent log
+fn waver_dbg(hypothesis_id: &str, location: &str, message: &str, data: &str) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let line = format!(
+        "{{\"id\":\"log_{ts}_{hypothesis_id}\",\"timestamp\":{ts},\"location\":{location:?},\"message\":{message:?},\"data\":{data},\"hypothesisId\":{hypothesis_id:?}}}\n"
+    );
+    eprintln!("WAVER_DBG {hypothesis_id} {location} {message} {data}");
+    for path in ["/opt/cursor/logs/debug.log", "/tmp/waver_ui_debug.log"] {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = f.write_all(line.as_bytes());
+        }
+    }
+}
+// #endregion
 
 const KNOB_RADIUS: f32 = 18.0;
 const DRAG_SENSITIVITY: f32 = 0.008;
@@ -30,32 +50,87 @@ pub fn rotary_knob(
             egui::Sense::click_and_drag(),
         );
 
+        // #region agent log
+        {
+            static KNOB_LAYOUT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = KNOB_LAYOUT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 8 {
+                waver_dbg(
+                    "E",
+                    "editor/knob.rs:rotary_knob",
+                    "panel_knob_layout",
+                    &format!(
+                        "{{\"label\":{label:?},\"rect\":[{:.1},{:.1},{:.1},{:.1}]}}",
+                        rect.min.x, rect.min.y, rect.max.x, rect.max.y
+                    ),
+                );
+            }
+        }
+        // #endregion
+
         if response.double_clicked() {
             *value = default_for_range(&range, scale);
             response.mark_changed();
         }
 
-        if response.dragged() {
-            let delta = -response.drag_delta().y * DRAG_SENSITIVITY;
-            let next = match scale {
-                KnobScale::Linear => {
-                    let span = *range.end() - *range.start();
-                    (*value + delta * span).clamp(*range.start(), *range.end())
+        let primary_down = ui.input(|i| i.pointer.primary_down());
+        let decidedly = ui.input(|i| i.pointer.is_decidedly_dragging());
+        let before = *value;
+        // Prefer raw pointer delta while the button is held on this knob — Response::dragged()
+        // alone often stays false when another Sense::click_and_drag (canvas) is active.
+        let pointer_delta = ui.input(|i| i.pointer.delta());
+        let active = response.is_pointer_button_down_on()
+            || response.dragged()
+            || (response.contains_pointer() && primary_down);
+        if active {
+            let dy = if response.dragged() {
+                -response.drag_delta().y
+            } else {
+                -pointer_delta.y
+            } * DRAG_SENSITIVITY;
+            if dy.abs() > f32::EPSILON {
+                let next = match scale {
+                    KnobScale::Linear => {
+                        let span = *range.end() - *range.start();
+                        (*value + dy * span).clamp(*range.start(), *range.end())
+                    }
+                    KnobScale::Logarithmic => {
+                        let log_min = range.start().max(1e-6).ln();
+                        let log_max = range.end().max(1e-6).ln();
+                        let log_v = value.max(1e-6).ln().clamp(log_min, log_max);
+                        (log_v + dy * (log_max - log_min))
+                            .exp()
+                            .clamp(*range.start(), *range.end())
+                    }
+                };
+                if (next - *value).abs() > f32::EPSILON {
+                    *value = next;
+                    response.mark_changed();
                 }
-                KnobScale::Logarithmic => {
-                    let log_min = range.start().max(1e-6).ln();
-                    let log_max = range.end().max(1e-6).ln();
-                    let log_v = value.max(1e-6).ln().clamp(log_min, log_max);
-                    (log_v + delta * (log_max - log_min))
-                        .exp()
-                        .clamp(*range.start(), *range.end())
-                }
-            };
-            if (next - *value).abs() > f32::EPSILON {
-                *value = next;
-                response.mark_changed();
             }
         }
+
+        // #region agent log
+        if primary_down || response.dragged() || response.clicked() || response.is_pointer_button_down_on() {
+            let dy = response.drag_delta().y;
+            waver_dbg(
+                "D",
+                "editor/knob.rs:rotary_knob",
+                "panel_knob",
+                &format!(
+                    "{{\"label\":{label:?},\"rect\":[{:.1},{:.1},{:.1},{:.1}],\"hovered\":{},\"dragged\":{},\"down_on\":{},\"contains\":{},\"clicked\":{},\"decidedly_dragging\":{decidedly},\"drag_delta_y\":{dy:.2},\"before\":{before:.4},\"after\":{:.4},\"changed\":{},\"runId\":\"post-fix\"}}",
+                    rect.min.x, rect.min.y, rect.max.x, rect.max.y,
+                    response.hovered(),
+                    response.dragged(),
+                    response.is_pointer_button_down_on(),
+                    response.contains_pointer(),
+                    response.clicked(),
+                    *value,
+                    response.changed()
+                ),
+            );
+        }
+        // #endregion
 
         if response.hovered() || response.dragged() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
