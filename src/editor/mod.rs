@@ -484,15 +484,7 @@ impl PatchEditor {
                 }
             }
         } else {
-            theme::caption(
-                ui,
-                match node.kind {
-                    NodeKind::Output => "将输入信号发送到音频设备。",
-                    NodeKind::Delay => "将信号延迟一个音频块。",
-                    NodeKind::Silence => "输出恒为零的静音信号。",
-                    _ => "此模块暂无可编辑参数。",
-                },
-            );
+            theme::caption(ui, node.kind.desc().inspector_blurb);
         }
         ui.add_space(28.0);
         theme::caption(ui, "端口");

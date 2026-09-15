@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use eframe::egui;
 use rtrb::Producer;
-use waver_core::{EngineStatus, NodeKind, RtCommand};
+use waver_core::{EngineStatus, MODULE_CATALOG, ModuleSection, RtCommand};
 
 use crate::editor::PatchEditor;
 use crate::patch_state::PatchState;
@@ -180,56 +180,36 @@ impl WaverApp {
         egui::ScrollArea::vertical().show(ui, |ui| {
             let query = self.module_search.trim().to_lowercase();
             let mut matches = 0;
-            for (section, modules) in [
-                (
-                    "核心",
-                    &[
-                        ("振荡器", "VCO", Some(NodeKind::Vco)),
-                        ("输出", "Output", Some(NodeKind::Output)),
-                    ][..],
-                ),
-                (
-                    "工具",
-                    &[
-                        ("块延迟", "Delay", Some(NodeKind::Delay)),
-                        ("静音源", "Silence", Some(NodeKind::Silence)),
-                    ][..],
-                ),
-                (
-                    "计划中",
-                    &[
-                        ("滤波器", "VCF", None),
-                        ("放大器", "VCA", None),
-                        ("包络", "ADSR", None),
-                        ("LFO", "LFO", None),
-                        ("混音器", "Mixer", None),
-                    ][..],
-                ),
+            for section in [
+                ModuleSection::Core,
+                ModuleSection::Utility,
+                ModuleSection::Planned,
             ] {
-                let visible: Vec<_> = modules
+                let visible: Vec<_> = MODULE_CATALOG
                     .iter()
-                    .filter(|(name, code, _)| {
+                    .filter(|desc| desc.section == section)
+                    .filter(|desc| {
                         query.is_empty()
-                            || name.contains(&query)
-                            || code.to_lowercase().contains(&query)
+                            || desc.name.contains(&query)
+                            || desc.code.to_lowercase().contains(&query)
                     })
                     .collect();
                 if visible.is_empty() {
                     continue;
                 }
-                theme::caption(ui, section);
+                theme::caption(ui, section.label());
                 ui.add_space(4.0);
-                for (name, code, kind) in visible {
+                for desc in visible {
                     matches += 1;
                     let response = ui.add_enabled(
-                        kind.is_some(),
-                        egui::Button::new(format!("{name}  ·  {code}"))
+                        desc.addable,
+                        egui::Button::new(format!("{}  ·  {}", desc.name, desc.code))
                             .min_size(egui::vec2(ui.available_width(), 46.0))
                             .stroke(egui::Stroke::NONE),
                     );
-                    if let Some(kind) = kind {
+                    if desc.addable {
                         if response.on_hover_text("点击添加到画布").clicked() {
-                            let id = self.patch.add_node(*kind);
+                            let id = self.patch.add_node(desc.kind);
                             self.patch.selected = Some(id);
                             self.patch.recompile(&mut self.commands);
                         }

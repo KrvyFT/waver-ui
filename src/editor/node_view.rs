@@ -148,18 +148,13 @@ pub fn draw_node_visual(
             );
         }
     } else {
-        text(
-            painter,
-            rect.min + egui::vec2(16.0, 132.0),
-            match node.kind {
-                NodeKind::Output => "音频设备输出",
-                NodeKind::Delay => "1 block · 块延迟",
-                NodeKind::Silence => "静音信号源",
-                _ => "计划中",
-            },
-            12.0,
-            theme::MUTED,
-        );
+            text(
+                painter,
+                rect.min + egui::vec2(16.0, 132.0),
+                node.kind.desc().summary,
+                12.0,
+                theme::MUTED,
+            );
     }
 
     let mut jacks = Vec::new();
@@ -260,17 +255,7 @@ fn draw_knob(painter: &egui::Painter, center: egui::Pos2, label: &str, value: &s
 }
 
 pub fn kind_label(kind: NodeKind) -> &'static str {
-    match kind {
-        NodeKind::Vco => "振荡器 · VCO",
-        NodeKind::Output => "输出 · Output",
-        NodeKind::Vcf => "滤波器 · VCF",
-        NodeKind::Vca => "放大器 · VCA",
-        NodeKind::Adsr => "包络 · ADSR",
-        NodeKind::Lfo => "LFO",
-        NodeKind::Mixer => "混音器 · Mixer",
-        NodeKind::Silence => "静音源 · Silence",
-        NodeKind::Delay => "块延迟 · Delay",
-    }
+    kind.desc().canvas_label
 }
 
 #[cfg(test)]
