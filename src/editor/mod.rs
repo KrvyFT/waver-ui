@@ -11,18 +11,20 @@ use rtrb::Producer;
 use waver_core::{NodeId, NodeKind, ParamId, RtCommand};
 
 use crate::patch_state::PatchState;
+use crate::theme;
 
 pub use cable::CableState;
 
-use self::cable::{
-    cable_distance, draw_cable, JackPos, CABLE_HIT_RADIUS, JACK_HIT_RADIUS,
-};
-use self::knob::{KnobScale, rotary_knob, wave_selector};
-use self::node_view::{draw_node_visual, hit_test_node, NodeHit, VCO_SIZE};
+use self::cable::{CABLE_HIT_RADIUS, JACK_HIT_RADIUS, JackPos, cable_distance, draw_cable};
+use self::knob::wave_selector;
+use self::node_view::{NodeHit, draw_node_visual, hit_test_node, kind_label, node_size};
 
 #[derive(Clone, Copy)]
 enum DragKind {
-    Node { id: NodeId, grab_offset: egui::Vec2 },
+    Node {
+        id: NodeId,
+        grab_offset: egui::Vec2,
+    },
     Knob {
         node: NodeId,
         param: u32,
@@ -64,81 +66,50 @@ impl PatchEditor {
             self.drag = None;
         }
 
-        ui.horizontal(|ui| {
-            if ui.button("+ VCO").clicked() {
-                let id = patch.add_node(NodeKind::Vco);
-                patch.selected = Some(id);
-                patch.recompile(commands);
-            }
-            if ui.button("+ Output").clicked() {
-                let id = patch.add_node(NodeKind::Output);
-                patch.selected = Some(id);
-                patch.recompile(commands);
-            }
-            if ui.button("删除选中").clicked() && patch.remove_selected() {
-                patch.recompile(commands);
-            }
-            let del_cable = ui.button("删除连线");
-            if del_cable.clicked() {
-                let edge_len = patch.graph.edges().len();
-                let idx = self.hovered_cable.or_else(|| {
-                    if edge_len == 1 {
-                        Some(0)
-                    } else {
-                        None
-                    }
-                });
-                if let Some(idx) = idx {
-                    if patch.disconnect_edge(idx) {
-                        self.hovered_cable = None;
-                        patch.recompile(commands);
-                    }
-                }
-            }
-            ui.label(
-                egui::RichText::new("拖标题移动 · 拖旋钮调参 · 点 OUT→IN 连线 · 悬停线 Delete 删除")
-                    .color(egui::Color32::from_gray(150))
-                    .size(12.0),
-            );
-        });
-
         if let Some(err) = &patch.compile_error {
             ui.colored_label(egui::Color32::from_rgb(220, 80, 80), err.to_string());
         }
 
-        ui.separator();
-
-        let param_height = 120.0;
-        let canvas_height = (ui.available_height() - param_height - 8.0).max(160.0);
         let (response, painter) =
-            ui.allocate_painter(egui::vec2(ui.available_width(), canvas_height), egui::Sense::click_and_drag());
+            ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
         let canvas_rect = response.rect;
-        painter.rect_filled(canvas_rect, 0.0, egui::Color32::from_rgb(28, 30, 36));
+        painter.rect_filled(canvas_rect, 0.0, theme::CANVAS);
+        for x in (0..canvas_rect.width() as i32).step_by(24) {
+            for y in (0..canvas_rect.height() as i32).step_by(24) {
+                painter.circle_filled(
+                    canvas_rect.min + egui::vec2(x as f32 + 1.0, y as f32 + 1.0),
+                    1.0,
+                    egui::Color32::from_rgb(47, 50, 58),
+                );
+            }
+        }
+        painter.text(
+            canvas_rect.min + egui::vec2(28.0, 28.0),
+            egui::Align2::LEFT_TOP,
+            "PATCH 画布 · 拖动模块 · 连接端口",
+            egui::FontId::proportional(12.0),
+            theme::MUTED,
+        );
 
-        let pointer = response.interact_pointer_pos().or_else(|| {
-            ui.input(|i| i.pointer.hover_pos())
-        });
+        let pointer = response
+            .interact_pointer_pos()
+            .or_else(|| ui.input(|i| i.pointer.hover_pos()));
 
         // Rebuild geometry for this frame.
         self.jack_cache.clear();
         self.node_rects.clear();
         let nodes: Vec<_> = patch.graph.nodes().to_vec();
         for node in &nodes {
-            let pos = patch.position(node.id);
-            let size = match node.kind {
-                NodeKind::Vco => VCO_SIZE,
-                _ => egui::vec2(140.0, 72.0),
-            };
-            // Keep nodes inside canvas on first layout if needed.
-            let pos = {
-                let mut p = pos;
-                if p.x < canvas_rect.left() || p.y < canvas_rect.top() {
-                    p = canvas_rect.min
-                        + egui::vec2(30.0 + node.id.raw() as f32 * 280.0, 40.0);
-                    patch.set_position(node.id, p);
-                }
-                p
-            };
+            // Positions are canvas-local, so panel/window changes do not move the patch.
+            let size = node_size(node.kind);
+            let local = patch.position(node.id);
+            let local = egui::pos2(
+                local.x.clamp(0.0, (canvas_rect.width() - size.x).max(0.0)),
+                local
+                    .y
+                    .clamp(60.0, (canvas_rect.height() - size.y).max(60.0)),
+            );
+            let pos = canvas_rect.min + local.to_vec2();
             let rect = egui::Rect::from_min_size(pos, size);
             self.node_rects.insert(node.id, rect);
             let jacks = draw_node_visual(
@@ -153,7 +124,9 @@ impl PatchEditor {
 
         // Hovered cable: sticky index kept for Delete/toolbar, but highlight + floating
         // button only while the pointer is actually near a cable this frame.
-        let hovered_now = pointer.and_then(|p| nearest_cable_index(p, patch, &self.jack_cache));
+        let hovered_now = pointer
+            .filter(|p| canvas_rect.contains(*p))
+            .and_then(|p| nearest_cable_index(p, patch, &self.jack_cache));
         if let Some(idx) = hovered_now {
             self.hovered_cable = Some(idx);
             ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
@@ -190,7 +163,7 @@ impl PatchEditor {
                 if hot {
                     egui::Color32::from_rgb(255, 120, 80)
                 } else {
-                    egui::Color32::from_rgb(200, 200, 80)
+                    theme::CABLE
                 },
                 if hot { 3.5 } else { 2.5 },
                 false,
@@ -207,8 +180,7 @@ impl PatchEditor {
                 .order(egui::Order::Foreground)
                 .show(ui.ctx(), |ui| {
                     let resp = ui.add(
-                        egui::Button::new("删除连线")
-                            .fill(egui::Color32::from_rgb(180, 60, 50)),
+                        egui::Button::new("删除连线").fill(egui::Color32::from_rgb(180, 60, 50)),
                     );
                     if resp.clicked() && patch.disconnect_edge(idx) {
                         self.hovered_cable = None;
@@ -242,10 +214,6 @@ impl PatchEditor {
             hovered_cable,
             canvas_rect,
         );
-
-        ui.add_space(4.0);
-        ui.separator();
-        self.param_panel(ui, patch);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -263,13 +231,19 @@ impl PatchEditor {
         let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
         let primary_released = ui.input(|i| i.pointer.primary_released());
         let secondary_clicked = ui.input(|i| i.pointer.secondary_clicked());
-        let delete_key = ui.input(|i| {
-            i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)
-        });
+        let delete_key = !ui.ctx().egui_wants_keyboard_input()
+            && ui
+                .input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
 
         let Some(pointer) = pointer else {
             return;
         };
+
+        // Sidebars and popup controls own their pointer events. Only an active drag
+        // may continue outside the canvas; never clear selection from an inspector click.
+        if self.drag.is_none() && !response.contains_pointer() {
+            return;
+        }
 
         // Double-click near a cable also deletes it.
         if response.double_clicked() {
@@ -300,7 +274,7 @@ impl PatchEditor {
         }
 
         // Begin drag / click on press.
-        if primary_pressed {
+        if primary_pressed && canvas_rect.contains(pointer) {
             if let Some(jack) = self
                 .jack_cache
                 .iter()
@@ -374,7 +348,7 @@ impl PatchEditor {
                             (canvas_rect.bottom() - size.y).max(canvas_rect.top()),
                         ),
                     );
-                    patch.set_position(id, clamped);
+                    patch.set_position(id, (clamped - canvas_rect.min).to_pos2());
                     return;
                 }
                 Some(DragKind::Knob {
@@ -438,71 +412,129 @@ impl PatchEditor {
         }
     }
 
-    fn param_panel(&self, ui: &mut egui::Ui, patch: &PatchState) {
-        // Always expose first VCO params so knobs are usable even without selection.
-        let vco_id = patch
-            .selected
-            .filter(|id| patch.graph.node(*id).map(|n| n.kind) == Some(NodeKind::Vco))
-            .or_else(|| {
-                patch
-                    .graph
-                    .nodes()
-                    .iter()
-                    .find(|n| n.kind == NodeKind::Vco)
-                    .map(|n| n.id)
-            });
-
-        let Some(selected) = vco_id else {
-            ui.label("添加 VCO 以编辑参数。");
+    pub fn inspector(
+        &mut self,
+        ui: &mut egui::Ui,
+        patch: &mut PatchState,
+        commands: &mut Producer<RtCommand>,
+    ) {
+        ui.heading("属性检查器");
+        let Some(node) = patch.selected.and_then(|id| patch.graph.node(id)).copied() else {
+            ui.add_space(16.0);
+            theme::caption(ui, "选择一个模块以查看属性");
             return;
         };
-        let Some(compiled) = &patch.compiled else {
-            ui.label("补丁尚未编译。");
-            return;
-        };
-
         ui.label(
-            egui::RichText::new("VCO 参数（底部旋钮与模块旋钮同步）")
-                .color(egui::Color32::from_gray(160)),
+            egui::RichText::new(kind_label(node.kind))
+                .size(12.0)
+                .color(theme::ACCENT),
         );
-        ui.horizontal(|ui| {
-            if let Some(freq) = compiled.params.get(selected, ParamId::new(0)) {
-                let mut v = freq.value();
-                if rotary_knob(
-                    ui,
-                    egui::Id::new(("panel_knob", selected.raw(), 0u32)),
-                    "频率",
-                    &mut v,
-                    20.0..=2000.0,
-                    KnobScale::Logarithmic,
-                )
-                .changed()
-                {
-                    freq.set(v);
+        ui.add_space(28.0);
+        if node.kind == NodeKind::Vco {
+            if let Some(compiled) = &patch.compiled {
+                ui.spacing_mut().slider_width = ui.available_width();
+                if let Some(freq) = compiled.params.get(node.id, ParamId::new(0)) {
+                    theme::caption(ui, "频率");
+                    let mut value = freq.value();
+                    ui.label(
+                        egui::RichText::new(format!("{value:.0} Hz"))
+                            .size(24.0)
+                            .color(egui::Color32::WHITE),
+                    );
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut value, 20.0..=2000.0)
+                                .logarithmic(true)
+                                .show_value(false),
+                        )
+                        .changed()
+                    {
+                        freq.set(value);
+                    }
+                }
+                ui.add_space(28.0);
+                if let Some(amp) = compiled.params.get(node.id, ParamId::new(1)) {
+                    theme::caption(ui, "振幅");
+                    let mut value = amp.value();
+                    ui.label(
+                        egui::RichText::new(format!("{:.0}%", value * 100.0))
+                            .size(24.0)
+                            .color(egui::Color32::WHITE),
+                    );
+                    if ui
+                        .add(egui::Slider::new(&mut value, 0.0..=1.0).show_value(false))
+                        .changed()
+                    {
+                        amp.set(value);
+                    }
+                    if value == 0.0 {
+                        ui.label(
+                            egui::RichText::new("当前振荡器静音")
+                                .size(11.0)
+                                .color(theme::GOOD),
+                        );
+                    }
+                }
+                ui.add_space(28.0);
+                if let Some(wave) = compiled.params.get(node.id, ParamId::new(2)) {
+                    let mut value = wave.value();
+                    if wave_selector(ui, &mut value) {
+                        wave.set(value);
+                    }
                 }
             }
-            if let Some(amp) = compiled.params.get(selected, ParamId::new(1)) {
-                let mut v = amp.value();
-                if rotary_knob(
-                    ui,
-                    egui::Id::new(("panel_knob", selected.raw(), 1u32)),
-                    "振幅",
-                    &mut v,
-                    0.0..=1.0,
-                    KnobScale::Linear,
-                )
-                .changed()
-                {
-                    amp.set(v);
+        } else {
+            theme::caption(
+                ui,
+                match node.kind {
+                    NodeKind::Output => "将输入信号发送到音频设备。",
+                    NodeKind::Delay => "将信号延迟一个音频块。",
+                    NodeKind::Silence => "输出恒为零的静音信号。",
+                    _ => "此模块暂无可编辑参数。",
+                },
+            );
+        }
+        ui.add_space(28.0);
+        theme::caption(ui, "端口");
+        let counts = node.kind.port_counts();
+        if counts.inputs > 0 {
+            ui.colored_label(theme::INPUT, format!("IN 输入 · {}", counts.inputs));
+        }
+        if counts.outputs > 0 {
+            ui.colored_label(theme::OUTPUT, format!("OUT 输出 · {}", counts.outputs));
+        }
+        ui.add_space(24.0);
+        if ui
+            .add_sized(
+                [ui.available_width(), 36.0],
+                egui::Button::new("删除选中模块"),
+            )
+            .clicked()
+            && patch.remove_selected()
+        {
+            self.cable.cancel();
+            self.drag = None;
+            self.hovered_cable = None;
+            patch.recompile(commands);
+        }
+        let cable_index = self
+            .hovered_cable
+            .filter(|idx| *idx < patch.graph.edges().len())
+            .or_else(|| (patch.graph.edges().len() == 1).then_some(0));
+        if ui
+            .add_enabled(
+                cable_index.is_some(),
+                egui::Button::new("删除连线").min_size(egui::vec2(ui.available_width(), 36.0)),
+            )
+            .clicked()
+        {
+            if let Some(index) = cable_index {
+                if patch.disconnect_edge(index) {
+                    self.hovered_cable = None;
+                    patch.recompile(commands);
                 }
             }
-            if let Some(wave) = compiled.params.get(selected, ParamId::new(2)) {
-                let mut v = wave.value();
-                if wave_selector(ui, &mut v) {
-                    wave.set(v);
-                }
-            }
-        });
+        }
     }
 }
 

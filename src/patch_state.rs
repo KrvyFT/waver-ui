@@ -5,9 +5,7 @@ use std::sync::Arc;
 
 use eframe::egui;
 use rtrb::Producer;
-use waver_core::{
-    CompiledPatch, Graph, GraphError, NodeId, NodeKind, PortRef, RtCommand,
-};
+use waver_core::{CompiledPatch, Graph, GraphError, NodeId, NodeKind, PortRef, RtCommand};
 
 /// UI-owned patch editing state.
 pub struct PatchState {
@@ -28,8 +26,8 @@ impl PatchState {
             compile_error: None,
             selected: None,
         };
-        let vco = state.add_node_at(NodeKind::Vco, egui::pos2(40.0, 160.0));
-        let out = state.add_node_at(NodeKind::Output, egui::pos2(360.0, 180.0));
+        let vco = state.add_node_at(NodeKind::Vco, egui::pos2(76.0, 188.0));
+        let out = state.add_node_at(NodeKind::Output, egui::pos2(400.0, 264.0));
         state.try_connect(
             PortRef {
                 node: vco,
@@ -40,6 +38,7 @@ impl PatchState {
                 port: waver_core::PortId::new(0),
             },
         );
+        state.selected = Some(vco);
         state
     }
 

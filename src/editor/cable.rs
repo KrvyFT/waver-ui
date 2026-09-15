@@ -15,10 +15,7 @@ pub struct JackPos {
 #[derive(Clone, Debug)]
 pub enum CableState {
     Idle,
-    Dragging {
-        from: PortRef,
-        from_pos: egui::Pos2,
-    },
+    Dragging { from: PortRef, from_pos: egui::Pos2 },
 }
 
 impl CableState {
@@ -48,7 +45,10 @@ pub fn draw_cable(
             let t0 = i as f32 / steps as f32;
             let t1 = (i + 1) as f32 / steps as f32;
             painter.line_segment(
-                [bezier_point(from, c1, c2, to, t0), bezier_point(from, c1, c2, to, t1)],
+                [
+                    bezier_point(from, c1, c2, to, t0),
+                    bezier_point(from, c1, c2, to, t1),
+                ],
                 egui::Stroke::new(width, color),
             );
         }
@@ -57,10 +57,7 @@ pub fn draw_cable(
             .map(|i| bezier_point(from, c1, c2, to, i as f32 / 32.0))
             .collect();
         for window in points.windows(2) {
-            painter.line_segment(
-                [window[0], window[1]],
-                egui::Stroke::new(width, color),
-            );
+            painter.line_segment([window[0], window[1]], egui::Stroke::new(width, color));
         }
     }
 }
@@ -73,7 +70,13 @@ fn control_points(from: egui::Pos2, to: egui::Pos2) -> (egui::Pos2, egui::Pos2) 
     )
 }
 
-fn bezier_point(p0: egui::Pos2, p1: egui::Pos2, p2: egui::Pos2, p3: egui::Pos2, t: f32) -> egui::Pos2 {
+fn bezier_point(
+    p0: egui::Pos2,
+    p1: egui::Pos2,
+    p2: egui::Pos2,
+    p3: egui::Pos2,
+    t: f32,
+) -> egui::Pos2 {
     let u = 1.0 - t;
     let tt = t * t;
     let uu = u * u;
@@ -114,4 +117,4 @@ pub fn cable_distance(pointer: egui::Pos2, from: egui::Pos2, to: egui::Pos2) -> 
 pub const CABLE_HIT_RADIUS: f32 = 22.0;
 
 /// Hit-test radius around a jack center.
-pub const JACK_HIT_RADIUS: f32 = 12.0;
+pub const JACK_HIT_RADIUS: f32 = 16.0;
