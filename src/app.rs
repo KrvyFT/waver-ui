@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use eframe::egui;
 use rtrb::Producer;
-use waver_core::{EngineStatus, MODULE_CATALOG, ModuleSection, RtCommand};
+use waver_core::{EngineStatus, MODULE_CATALOG, ModuleFamily, RtCommand};
 
 use crate::editor::PatchEditor;
 use crate::patch_state::PatchState;
@@ -180,14 +180,10 @@ impl WaverApp {
         egui::ScrollArea::vertical().show(ui, |ui| {
             let query = self.module_search.trim().to_lowercase();
             let mut matches = 0;
-            for section in [
-                ModuleSection::Core,
-                ModuleSection::Utility,
-                ModuleSection::Planned,
-            ] {
+            for &family in ModuleFamily::ALL {
                 let visible: Vec<_> = MODULE_CATALOG
                     .iter()
-                    .filter(|desc| desc.section == section)
+                    .filter(|desc| desc.family == family)
                     .filter(|desc| {
                         query.is_empty()
                             || desc.name.contains(&query)
@@ -197,7 +193,7 @@ impl WaverApp {
                 if visible.is_empty() {
                     continue;
                 }
-                theme::caption(ui, section.label());
+                theme::caption(ui, family.label());
                 ui.add_space(4.0);
                 for desc in visible {
                     matches += 1;
@@ -389,7 +385,7 @@ mod tests {
             &ctx,
             &mut app,
             size,
-            text_rect(&output, "振荡器  ·  VCO").center(),
+            text_rect(&output, "压控振荡器  ·  VCO").center(),
         );
         assert_eq!(app.patch.graph.nodes().len(), 3);
         assert_ne!(app.patch.selected, selected);
@@ -433,5 +429,50 @@ mod tests {
                 .count()
                 >= 2
         );
+    }
+
+    #[test]
+    fn noise_library_entry_and_generic_inspector_fit_narrow_window() {
+        let (ctx, mut app, _consumer) = fixture();
+        let size = egui::vec2(1000.0, 640.0);
+        draw(&ctx, &mut app, size, vec![]);
+        let output = draw(&ctx, &mut app, size, vec![]);
+        click(
+            &ctx,
+            &mut app,
+            size,
+            text_rect(&output, "白噪声  ·  Noise").center(),
+        );
+        let selected = app.patch.selected.unwrap();
+        assert_eq!(
+            app.patch.graph.node(selected).unwrap().kind,
+            waver_core::NodeKind::Noise
+        );
+        let output = draw(&ctx, &mut app, size, vec![]);
+        let value_rect = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text().parse::<f32>().ok() == Some(0.2) => {
+                    Some(text.galley.rect.translate(text.pos.to_vec2()))
+                }
+                _ => None,
+            })
+            .expect("generic slider numeric value must be visible");
+        assert!(
+            value_rect.right() < size.x - 16.0,
+            "numeric editor must fit inside inspector: {value_rect:?}"
+        );
+        let amp = app
+            .patch
+            .compiled
+            .as_ref()
+            .unwrap()
+            .params
+            .get(selected, ParamId::new(0))
+            .unwrap();
+        assert_eq!(amp.value(), 0.2);
+        click(&ctx, &mut app, size, value_rect.center());
+        assert_eq!(app.patch.selected, Some(selected));
     }
 }

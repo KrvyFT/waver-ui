@@ -483,6 +483,32 @@ impl PatchEditor {
                     }
                 }
             }
+        } else if node.kind.port_counts().params > 0 {
+            if let Some(compiled) = &patch.compiled {
+                // Reserve room for the numeric editor beside a generic slider.
+                ui.spacing_mut().slider_width = (ui.available_width() - 64.0).max(80.0);
+                let blurb = node.kind.desc().inspector_blurb;
+                if !blurb.is_empty() {
+                    theme::caption(ui, blurb);
+                    ui.add_space(16.0);
+                }
+                let param_count = node.kind.port_counts().params;
+                for raw in 0..param_count {
+                    let param = ParamId::new(raw);
+                    let Some(cell) = compiled.params.get(node.id, param) else {
+                        continue;
+                    };
+                    theme::caption(ui, waver_core::param_label(node.kind, param));
+                    let mut value = cell.value();
+                    if ui
+                        .add(egui::Slider::new(&mut value, 0.0..=1.0).show_value(true))
+                        .changed()
+                    {
+                        cell.set(value);
+                    }
+                    ui.add_space(16.0);
+                }
+            }
         } else {
             theme::caption(ui, node.kind.desc().inspector_blurb);
         }
