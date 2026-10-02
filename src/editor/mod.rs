@@ -67,28 +67,58 @@ impl PatchEditor {
         }
 
         if let Some(err) = &patch.compile_error {
-            ui.colored_label(egui::Color32::from_rgb(220, 80, 80), err.to_string());
+            ui.colored_label(theme::DANGER, err.to_string());
         }
 
         let (response, painter) =
             ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
         let canvas_rect = response.rect;
         painter.rect_filled(canvas_rect, 0.0, theme::CANVAS);
-        for x in (0..canvas_rect.width() as i32).step_by(24) {
-            for y in (0..canvas_rect.height() as i32).step_by(24) {
-                painter.circle_filled(
-                    canvas_rect.min + egui::vec2(x as f32 + 1.0, y as f32 + 1.0),
-                    1.0,
-                    egui::Color32::from_rgb(47, 50, 58),
-                );
-            }
+        for x in (0..canvas_rect.width() as i32).step_by(48) {
+            let x = canvas_rect.left() + x as f32;
+            painter.line_segment(
+                [
+                    egui::pos2(x, canvas_rect.top() + 72.0),
+                    egui::pos2(x, canvas_rect.bottom()),
+                ],
+                egui::Stroke::new(0.5, theme::GRID),
+            );
+        }
+        for y in (72..canvas_rect.height() as i32).step_by(48) {
+            let y = canvas_rect.top() + y as f32;
+            painter.line_segment(
+                [
+                    egui::pos2(canvas_rect.left(), y),
+                    egui::pos2(canvas_rect.right(), y),
+                ],
+                egui::Stroke::new(0.5, theme::GRID),
+            );
         }
         painter.text(
             canvas_rect.min + egui::vec2(28.0, 28.0),
             egui::Align2::LEFT_TOP,
-            "PATCH 画布 · 拖动模块 · 连接端口",
+            "PATCH / 信号画布",
             egui::FontId::proportional(12.0),
             theme::MUTED,
+        );
+
+        painter.text(
+            canvas_rect.min + egui::vec2(28.0, 52.0),
+            egui::Align2::LEFT_TOP,
+            format!(
+                "{} 个模块   /   {} 条连线",
+                patch.graph.nodes().len(),
+                patch.graph.edges().len()
+            ),
+            egui::FontId::proportional(12.0),
+            theme::MUTED,
+        );
+        painter.line_segment(
+            [
+                canvas_rect.min + egui::vec2(24.0, 80.0),
+                egui::pos2(canvas_rect.right() - 24.0, canvas_rect.top() + 80.0),
+            ],
+            egui::Stroke::new(1.0, theme::GRID),
         );
 
         let pointer = response
@@ -136,8 +166,14 @@ impl PatchEditor {
                 // Area cannot linger over nodes/knobs (was area_shown:true during drags).
                 let still_near_sticky = self.hovered_cable.and_then(|idx| {
                     let edge = patch.graph.edges().get(idx)?;
-                    let from = self.jack_cache.iter().find(|j| j.port == edge.from)?;
-                    let to = self.jack_cache.iter().find(|j| j.port == edge.to)?;
+                    let from = self
+                        .jack_cache
+                        .iter()
+                        .find(|j| j.is_output && j.port == edge.from)?;
+                    let to = self
+                        .jack_cache
+                        .iter()
+                        .find(|j| !j.is_output && j.port == edge.to)?;
                     let d = cable_distance(p, from.center, to.center);
                     Some(d <= CABLE_HIT_RADIUS * 2.5)
                 });
@@ -149,10 +185,18 @@ impl PatchEditor {
         let sticky_cable = self.hovered_cable;
         let near_cable = hovered_now;
         for (idx, edge) in patch.graph.edges().iter().enumerate() {
-            let Some(from) = self.jack_cache.iter().find(|j| j.port == edge.from) else {
+            let Some(from) = self
+                .jack_cache
+                .iter()
+                .find(|j| j.is_output && j.port == edge.from)
+            else {
                 continue;
             };
-            let Some(to) = self.jack_cache.iter().find(|j| j.port == edge.to) else {
+            let Some(to) = self
+                .jack_cache
+                .iter()
+                .find(|j| !j.is_output && j.port == edge.to)
+            else {
                 continue;
             };
             let hot = near_cable == Some(idx);
@@ -160,11 +204,7 @@ impl PatchEditor {
                 &painter,
                 from.center,
                 to.center,
-                if hot {
-                    egui::Color32::from_rgb(255, 120, 80)
-                } else {
-                    theme::CABLE
-                },
+                if hot { theme::DANGER } else { theme::CABLE },
                 if hot { 3.5 } else { 2.5 },
                 false,
             );
@@ -179,9 +219,7 @@ impl PatchEditor {
                 .fixed_pos(anchor)
                 .order(egui::Order::Foreground)
                 .show(ui.ctx(), |ui| {
-                    let resp = ui.add(
-                        egui::Button::new("删除连线").fill(egui::Color32::from_rgb(180, 60, 50)),
-                    );
+                    let resp = ui.add(egui::Button::new("删除连线").fill(theme::DANGER_SURFACE));
                     if resp.clicked() && patch.disconnect_edge(idx) {
                         self.hovered_cable = None;
                         patch.recompile(commands);
@@ -193,14 +231,7 @@ impl PatchEditor {
         // Live cable preview.
         if let CableState::Dragging { from_pos, .. } = &self.cable {
             if let Some(p) = pointer {
-                draw_cable(
-                    &painter,
-                    *from_pos,
-                    p,
-                    egui::Color32::from_rgb(180, 180, 100),
-                    2.0,
-                    true,
-                );
+                draw_cable(&painter, *from_pos, p, theme::ACCENT, 2.0, true);
             }
         }
 
@@ -360,9 +391,14 @@ impl PatchEditor {
                         if let Some(cell) = compiled.params.get(node, ParamId::new(param)) {
                             let dy = last_pointer.y - pointer.y;
                             let mut v = cell.value();
-                            if param == 0 {
-                                let log_v = v.max(20.0).ln();
-                                v = (log_v + dy * 0.012).exp().clamp(20.0, 2000.0);
+                            let hz_range = if param == 0 {
+                                patch.graph.node(node).and_then(|n| frequency_range(n.kind))
+                            } else {
+                                None
+                            };
+                            if let Some((min_hz, max_hz)) = hz_range {
+                                let log_v = v.max(min_hz).ln();
+                                v = (log_v + dy * 0.012).exp().clamp(min_hz, max_hz);
                             } else if param == 1 {
                                 v = (v + dy * 0.006).clamp(0.0, 1.0);
                             }
@@ -418,141 +454,141 @@ impl PatchEditor {
         patch: &mut PatchState,
         commands: &mut Producer<RtCommand>,
     ) {
-        ui.heading("属性检查器");
+        ui.horizontal(|ui| {
+            ui.heading("属性检查器");
+            theme::caption(ui, "设备 / 参数");
+        });
+        ui.separator();
         let Some(node) = patch.selected.and_then(|id| patch.graph.node(id)).copied() else {
             ui.add_space(16.0);
             theme::caption(ui, "选择一个模块以查看属性");
+            theme::caption(ui, "点击模块选择 · 拖动标题移动 · 点击 OUT 再点击 IN 连接");
             return;
         };
-        ui.label(
-            egui::RichText::new(kind_label(node.kind))
-                .size(12.0)
-                .color(theme::ACCENT),
-        );
-        ui.add_space(28.0);
-        if node.kind == NodeKind::Vco {
-            if let Some(compiled) = &patch.compiled {
-                ui.spacing_mut().slider_width = ui.available_width();
-                if let Some(freq) = compiled.params.get(node.id, ParamId::new(0)) {
-                    theme::caption(ui, "频率");
-                    let mut value = freq.value();
-                    ui.label(
-                        egui::RichText::new(format!("{value:.0} Hz"))
-                            .size(24.0)
-                            .color(egui::Color32::WHITE),
+        ui.add_space(4.0);
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(160.0, 98.0),
+                egui::Layout::top_down(egui::Align::LEFT),
+                |ui| {
+                    egui::Frame::new()
+                        .fill(theme::ACCENT)
+                        .inner_margin(6)
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(kind_label(node.kind))
+                                    .strong()
+                                    .color(theme::TEXT),
+                            );
+                        });
+                    ui.add_space(4.0);
+                    let counts = node.kind.port_counts();
+                    theme::caption(
+                        ui,
+                        &format!("{} 输入 / {} 输出", counts.inputs, counts.outputs),
                     );
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut value, 20.0..=2000.0)
-                                .logarithmic(true)
-                                .show_value(false),
-                        )
-                        .changed()
-                    {
-                        freq.set(value);
-                    }
-                }
-                ui.add_space(28.0);
-                if let Some(amp) = compiled.params.get(node.id, ParamId::new(1)) {
-                    theme::caption(ui, "振幅");
-                    let mut value = amp.value();
-                    ui.label(
-                        egui::RichText::new(format!("{:.0}%", value * 100.0))
-                            .size(24.0)
-                            .color(egui::Color32::WHITE),
-                    );
-                    if ui
-                        .add(egui::Slider::new(&mut value, 0.0..=1.0).show_value(false))
-                        .changed()
-                    {
-                        amp.set(value);
-                    }
-                    if value == 0.0 {
-                        ui.label(
-                            egui::RichText::new("当前振荡器静音")
-                                .size(11.0)
-                                .color(theme::GOOD),
-                        );
-                    }
-                }
-                ui.add_space(28.0);
-                if let Some(wave) = compiled.params.get(node.id, ParamId::new(2)) {
-                    let mut value = wave.value();
-                    if wave_selector(ui, &mut value) {
-                        wave.set(value);
-                    }
-                }
-            }
-        } else if node.kind.port_counts().params > 0 {
+                    theme::caption(ui, "参数实时生效");
+                    theme::caption(ui, "Esc 取消连接");
+                },
+            );
+            ui.separator();
             if let Some(compiled) = &patch.compiled {
-                // Reserve room for the numeric editor beside a generic slider.
-                ui.spacing_mut().slider_width = (ui.available_width() - 64.0).max(80.0);
-                let blurb = node.kind.desc().inspector_blurb;
-                if !blurb.is_empty() {
-                    theme::caption(ui, blurb);
-                    ui.add_space(16.0);
-                }
-                let param_count = node.kind.port_counts().params;
-                for raw in 0..param_count {
-                    let param = ParamId::new(raw);
-                    let Some(cell) = compiled.params.get(node.id, param) else {
+                for raw in 0..node.kind.port_counts().params {
+                    let Some(cell) = compiled.params.get(node.id, ParamId::new(raw)) else {
                         continue;
                     };
-                    theme::caption(ui, waver_core::param_label(node.kind, param));
-                    let mut value = cell.value();
-                    if ui
-                        .add(egui::Slider::new(&mut value, 0.0..=1.0).show_value(true))
-                        .changed()
-                    {
-                        cell.set(value);
-                    }
-                    ui.add_space(16.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(148.0, 98.0),
+                        egui::Layout::top_down(egui::Align::LEFT),
+                        |ui| {
+                            ui.spacing_mut().slider_width = 148.0;
+                            let mut value = cell.value();
+                            if node.kind == NodeKind::Vco && raw == 2 {
+                                if wave_selector(ui, &mut value) {
+                                    cell.set(value);
+                                }
+                            } else {
+                                theme::caption(
+                                    ui,
+                                    waver_core::param_label(node.kind, ParamId::new(raw)),
+                                );
+                                ui.add_space(4.0);
+                                let frequency = if raw == 0 {
+                                    frequency_range(node.kind)
+                                } else {
+                                    None
+                                };
+                                ui.label(
+                                    egui::RichText::new(match frequency {
+                                        Some(_) => format!("{value:.0} Hz"),
+                                        None => format!("{:.0}%", value * 100.0),
+                                    })
+                                    .size(20.0)
+                                    .color(theme::TEXT),
+                                );
+                                let changed = if let Some((min_hz, max_hz)) = frequency {
+                                    ui.add(
+                                        egui::Slider::new(&mut value, min_hz..=max_hz)
+                                            .logarithmic(true)
+                                            .show_value(false),
+                                    )
+                                    .changed()
+                                } else {
+                                    ui.spacing_mut().slider_width = 96.0;
+                                    ui.add(
+                                        egui::Slider::new(&mut value, 0.0..=1.0).show_value(true),
+                                    )
+                                    .changed()
+                                };
+                                if changed {
+                                    cell.set(value);
+                                }
+                            }
+                        },
+                    );
                 }
             }
-        } else {
-            theme::caption(ui, node.kind.desc().inspector_blurb);
-        }
-        ui.add_space(28.0);
-        theme::caption(ui, "端口");
-        let counts = node.kind.port_counts();
-        if counts.inputs > 0 {
-            ui.colored_label(theme::INPUT, format!("IN 输入 · {}", counts.inputs));
-        }
-        if counts.outputs > 0 {
-            ui.colored_label(theme::OUTPUT, format!("OUT 输出 · {}", counts.outputs));
-        }
-        ui.add_space(24.0);
-        if ui
-            .add_sized(
-                [ui.available_width(), 36.0],
-                egui::Button::new("删除选中模块"),
-            )
-            .clicked()
-            && patch.remove_selected()
-        {
-            self.cable.cancel();
-            self.drag = None;
-            self.hovered_cable = None;
-            patch.recompile(commands);
-        }
-        let cable_index = self
-            .hovered_cable
-            .filter(|idx| *idx < patch.graph.edges().len())
-            .or_else(|| (patch.graph.edges().len() == 1).then_some(0));
-        if ui
-            .add_enabled(
-                cable_index.is_some(),
-                egui::Button::new("删除连线").min_size(egui::vec2(ui.available_width(), 36.0)),
-            )
-            .clicked()
-        {
-            if let Some(index) = cable_index {
-                if patch.disconnect_edge(index) {
+            if node.kind.port_counts().params == 0 {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(220.0, 98.0),
+                    egui::Layout::top_down(egui::Align::LEFT),
+                    |ui| {
+                        theme::caption(ui, node.kind.desc().inspector_blurb);
+                    },
+                );
+            }
+            ui.separator();
+            ui.vertical(|ui| {
+                theme::caption(ui, "编辑");
+                if ui
+                    .add(egui::Button::new(
+                        egui::RichText::new("删除选中模块").color(theme::DANGER),
+                    ))
+                    .clicked()
+                    && patch.remove_selected()
+                {
+                    self.cable.cancel();
+                    self.drag = None;
                     self.hovered_cable = None;
                     patch.recompile(commands);
                 }
-            }
-        }
+                let cable_index = self
+                    .hovered_cable
+                    .filter(|idx| *idx < patch.graph.edges().len())
+                    .or_else(|| (patch.graph.edges().len() == 1).then_some(0));
+                if ui
+                    .add_enabled(cable_index.is_some(), egui::Button::new("删除连线"))
+                    .clicked()
+                {
+                    if let Some(index) = cable_index {
+                        if patch.disconnect_edge(index) {
+                            self.hovered_cable = None;
+                            patch.recompile(commands);
+                        }
+                    }
+                }
+            });
+        });
     }
 }
 
@@ -578,10 +614,10 @@ fn nearest_cable_index(
 ) -> Option<usize> {
     let mut best: Option<(usize, f32)> = None;
     for (idx, edge) in patch.graph.edges().iter().enumerate() {
-        let Some(from) = jacks.iter().find(|j| j.port == edge.from) else {
+        let Some(from) = jacks.iter().find(|j| j.is_output && j.port == edge.from) else {
             continue;
         };
-        let Some(to) = jacks.iter().find(|j| j.port == edge.to) else {
+        let Some(to) = jacks.iter().find(|j| !j.is_output && j.port == edge.to) else {
             continue;
         };
         let d = cable_distance(pointer, from.center, to.center);
@@ -590,4 +626,76 @@ fn nearest_cable_index(
         }
     }
     best.map(|(idx, _)| idx)
+}
+
+/// 参数 0 是频率（Hz）的模块：给出 `(下限, 上限)` 的对数范围。
+///
+/// `Vco` 的上限与 `node_view.rs` 里画旋钮弧度用的 20–2000 映射一致；
+/// 改这里必须同时改那张卡的绘制，否则旋钮位置与数值会不一致。
+fn frequency_range(kind: NodeKind) -> Option<(f32, f32)> {
+    match kind {
+        NodeKind::Vco => Some((20.0, 2_000.0)),
+        NodeKind::Vcf => Some((20.0, 20_000.0)),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod param_tests {
+    use super::*;
+
+    #[test]
+    fn only_frequency_parameters_use_hertz_ranges() {
+        assert_eq!(frequency_range(NodeKind::Vco), Some((20.0, 2_000.0)));
+        assert_eq!(frequency_range(NodeKind::Vcf), Some((20.0, 20_000.0)));
+        assert_eq!(frequency_range(NodeKind::Noise), None);
+        assert_eq!(frequency_range(NodeKind::Vca), None);
+    }
+}
+
+#[cfg(test)]
+mod cable_routing_tests {
+    use super::*;
+    use waver_core::{PortId, PortRef};
+
+    #[test]
+    fn filter_output_cable_hit_test_uses_output_not_same_numbered_input() {
+        let mut patch = PatchState::default_patch();
+        let filter = patch.add_node(NodeKind::Vcf);
+        let sink = patch.add_node(NodeKind::Output);
+        let from = PortRef {
+            node: filter,
+            port: PortId::new(0),
+        };
+        let to = PortRef {
+            node: sink,
+            port: PortId::new(0),
+        };
+        patch.try_connect(from, to);
+        let index = patch.graph.edges().len() - 1;
+        // Input and output port 0 deliberately share the same PortRef.
+        // Inputs are cached first, exactly as in draw_node_visual.
+        let jacks = [
+            JackPos {
+                port: from,
+                center: egui::pos2(0.0, 100.0),
+                is_output: false,
+            },
+            JackPos {
+                port: from,
+                center: egui::pos2(180.0, 100.0),
+                is_output: true,
+            },
+            JackPos {
+                port: to,
+                center: egui::pos2(360.0, 200.0),
+                is_output: false,
+            },
+        ];
+        assert_eq!(
+            nearest_cable_index(jacks[1].center, &patch, &jacks),
+            Some(index)
+        );
+        assert_eq!(nearest_cable_index(jacks[0].center, &patch, &jacks), None);
+    }
 }
