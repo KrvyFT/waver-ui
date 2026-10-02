@@ -8,10 +8,7 @@ pub fn setup(ctx: &egui::Context) {
 
     fonts.font_data.insert(
         "noto_sans_sc".to_owned(),
-        FontData::from_static(include_bytes!(
-            "../assets/fonts/NotoSansSC-Regular.otf"
-        ))
-        .into(),
+        FontData::from_static(include_bytes!("../assets/fonts/NotoSansSC-Regular.otf")).into(),
     );
 
     fonts
