@@ -1,6 +1,7 @@
 //! egui shell. Depends on core only, not waver-dsp.
 
 mod app;
+mod audio_settings;
 mod editor;
 mod fonts;
 mod patch_state;
