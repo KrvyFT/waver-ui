@@ -1,11 +1,14 @@
-//! Three-column patch workspace.
+//! Browser, patch workspace and bottom device panel.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use eframe::egui;
 use rtrb::Producer;
-use waver_core::{EngineStatus, MODULE_CATALOG, ModuleFamily, RtCommand};
+use waver_core::{
+    AudioCatalog, AudioSelection, AudioSettingsRequest, EngineStatus, MODULE_CATALOG, ModuleFamily,
+    RtCommand,
+};
 
 use crate::editor::PatchEditor;
 use crate::patch_state::PatchState;
@@ -21,6 +24,7 @@ pub struct WaverApp {
     editor: PatchEditor,
     module_search: String,
     bootstrapped: bool,
+    audio_settings: crate::audio_settings::AudioSettings,
 }
 
 impl WaverApp {
@@ -39,7 +43,47 @@ impl WaverApp {
             editor: PatchEditor::default(),
             module_search: String::new(),
             bootstrapped: false,
+            audio_settings: Default::default(),
         }
+    }
+
+    pub fn configure_audio_settings(&mut self, catalog: AudioCatalog, active: AudioSelection) {
+        self.audio_settings.catalog = catalog;
+        self.audio_settings.active = active.clone();
+        self.audio_settings.draft = active;
+        self.audio_settings.configured = true;
+    }
+
+    pub fn take_audio_request(&mut self) -> Option<AudioSettingsRequest> {
+        self.audio_settings.request.take()
+    }
+
+    pub fn update_audio_catalog(&mut self, catalog: AudioCatalog) {
+        self.audio_settings.catalog = catalog;
+    }
+
+    pub fn audio_switch_failed(&mut self, error: String) {
+        self.audio_settings.failed = true;
+        self.audio_settings.message = Some(format!("切换失败，当前输出保持不变：{error}"));
+    }
+
+    pub fn replace_audio(
+        &mut self,
+        commands: Producer<RtCommand>,
+        status: Arc<EngineStatus>,
+        device_name: String,
+        selection: AudioSelection,
+    ) {
+        self.commands = commands;
+        self.status = status;
+        self.device_name = device_name;
+        self.error = None;
+        self.audio_settings.active = selection.clone();
+        self.audio_settings.draft = selection;
+        self.audio_settings.failed = false;
+        self.audio_settings.message = Some("音频设置已应用".into());
+        self.patch.recompile(&mut self.commands);
+        self.bootstrapped = true;
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
@@ -51,139 +95,128 @@ impl WaverApp {
 
         // Panels share the App::ui root; nesting a CentralPanel steals canvas hits.
         egui::Panel::top("transport")
-            .exact_size(64.0)
+            .exact_size(38.0)
             .resizable(false)
-            .frame(theme::panel_frame(12))
+            .frame(theme::panel_frame(6))
             .show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("status_bar")
-            .exact_size(40.0)
+            .exact_size(26.0)
+            .resizable(false)
+            .frame(theme::panel_frame(4))
+            .show(ui, |ui| self.status_bar(ui));
+        egui::Panel::bottom("device_panel")
+            .exact_size(160.0)
             .resizable(false)
             .frame(theme::panel_frame(8))
-            .show(ui, |ui| self.status_bar(ui));
-        let compact = ui.available_width() < 1200.0;
-        egui::Panel::left("module_library")
-            .exact_size(if compact { 184.0 } else { 224.0 })
-            .resizable(false)
-            .frame(theme::panel_frame(16))
-            .show(ui, |ui| self.module_library(ui));
-        egui::Panel::right("inspector")
-            .exact_size(if compact { 244.0 } else { 280.0 })
-            .resizable(false)
-            .frame(theme::panel_frame(24))
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    self.editor
-                        .inspector(ui, &mut self.patch, &mut self.commands);
-                    ui.add_space(32.0);
-                    self.device_details(ui);
-                });
+                self.editor
+                    .inspector(ui, &mut self.patch, &mut self.commands);
             });
+        let compact = ui.available_width() < 1200.0;
+        if self.audio_settings.open {
+            egui::Panel::right("audio_settings")
+                .exact_size(288.0)
+                .resizable(false)
+                .frame(theme::panel_frame(12))
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        self.audio_settings
+                            .show(ui, &self.status, &self.device_name);
+                        if let Some(error) = &self.error {
+                            ui.colored_label(theme::DANGER, error);
+                        }
+                    });
+                });
+        }
+        egui::Panel::left("module_library")
+            .exact_size(if compact { 180.0 } else { 192.0 })
+            .resizable(false)
+            .frame(theme::panel_frame(8))
+            .show(ui, |ui| self.module_library(ui));
         self.editor.ui(ui, &mut self.patch, &mut self.commands);
     }
 
-    fn top_bar(&self, ui: &mut egui::Ui) {
+    fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_centered(|ui| {
-            ui.add_space(12.0);
+            ui.add_space(8.0);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
+            for (i, height) in [8.0, 16.0, 22.0, 12.0, 6.0].into_iter().enumerate() {
+                let x = rect.left() + 4.0 + i as f32 * 4.0;
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(x, rect.center().y - height / 2.0),
+                        egui::pos2(x, rect.center().y + height / 2.0),
+                    ],
+                    egui::Stroke::new(3.0, theme::ACCENT),
+                );
+            }
             ui.label(
                 egui::RichText::new("waver")
-                    .size(24.0)
+                    .size(18.0)
                     .strong()
-                    .color(theme::ACCENT),
+                    .color(theme::TEXT),
             );
-            ui.add_space(16.0);
-            ui.label(egui::RichText::new("未命名 Patch").strong());
             ui.add_space(12.0);
-            let ready = self.status.running() && self.error.is_none();
-            egui::Frame::new()
-                .fill(if ready {
-                    egui::Color32::from_rgb(24, 55, 42)
+            ui.separator();
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("未命名 Patch").size(14.0).strong());
+            theme::caption(ui, "本地工作区");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(8.0);
+                let ready = self.status.running() && self.error.is_none();
+                let label = if ready {
+                    "音频已连接"
                 } else {
-                    theme::SURFACE
-                })
-                .corner_radius(14)
-                .inner_margin(egui::Margin::symmetric(12, 5))
-                .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new(if ready {
-                            "● 音频就绪"
-                        } else {
-                            "● 音频未就绪"
-                        })
-                        .size(11.0)
-                        .color(if ready {
+                    "音频未连接"
+                };
+                if ui
+                    .add(
+                        egui::Button::new(egui::RichText::new(label).size(12.0).color(if ready {
                             theme::GOOD
                         } else {
                             theme::MUTED
+                        }))
+                        .fill(if self.audio_settings.open {
+                            theme::ACTIVE_SURFACE
+                        } else {
+                            theme::SURFACE
                         }),
-                    );
-                });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(8.0);
-                ui.allocate_ui_with_layout(
-                    egui::vec2(150.0, 40.0),
-                    egui::Layout::top_down(egui::Align::LEFT),
-                    |ui| {
-                        theme::caption(
-                            ui,
-                            &format!(
-                                "{} Hz · {} frames",
-                                self.status.sample_rate(),
-                                self.status.block()
-                            ),
-                        );
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{} 声道 · {} 次中断",
-                                self.status.channels(),
-                                self.status.xruns()
-                            ))
-                            .size(10.0)
-                            .color(theme::GOOD),
-                        );
-                    },
-                );
-                // The engine has no transport or master-mute command yet. Keep the
-                // reference controls explicitly disabled instead of reporting success.
-                for (label, width, fill, color) in [
-                    (
-                        "紧急静音",
-                        104.0,
-                        egui::Color32::from_rgb(58, 32, 35),
-                        theme::DANGER,
-                    ),
-                    ("静音", 80.0, theme::SURFACE, theme::TEXT),
-                    ("播放", 88.0, theme::ACCENT, theme::BACKGROUND),
-                ] {
-                    ui.add_enabled(
-                        false,
-                        egui::Button::new(egui::RichText::new(label).color(color))
-                            .fill(fill)
-                            .min_size(egui::vec2(width, 40.0)),
                     )
-                    .on_disabled_hover_text("计划中：当前引擎尚未提供播放 / 主静音控制");
+                    .on_hover_text("设置声卡、输出设备和音频后端")
+                    .clicked()
+                {
+                    self.audio_settings.open = !self.audio_settings.open;
+                    if self.audio_settings.open {
+                        self.audio_settings.draft = self.audio_settings.active.clone();
+                        if self.audio_settings.configured {
+                            self.audio_settings.request = Some(AudioSettingsRequest::Refresh);
+                        }
+                    }
                 }
+                theme::caption(ui, "PATCH / 模块合成");
             });
         });
     }
 
     fn module_library(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
+        theme::caption(ui, "浏览器");
         ui.heading("模块");
         ui.add_space(4.0);
         ui.add_sized(
-            [ui.available_width(), 36.0],
+            [ui.available_width(), 28.0],
             egui::TextEdit::singleline(&mut self.module_search)
                 .hint_text("搜索模块")
-                .margin(egui::vec2(12.0, 8.0)),
+                .margin(egui::vec2(8.0, 5.0)),
         );
-        ui.add_space(20.0);
+        ui.add_space(8.0);
         egui::ScrollArea::vertical().show(ui, |ui| {
             let query = self.module_search.trim().to_lowercase();
             let mut matches = 0;
             for &family in ModuleFamily::ALL {
                 let visible: Vec<_> = MODULE_CATALOG
                     .iter()
-                    .filter(|desc| desc.family == family)
+                    .filter(|desc| desc.family == family && desc.addable)
                     .filter(|desc| {
                         query.is_empty()
                             || desc.name.contains(&query)
@@ -200,7 +233,9 @@ impl WaverApp {
                     let response = ui.add_enabled(
                         desc.addable,
                         egui::Button::new(format!("{}  ·  {}", desc.name, desc.code))
-                            .min_size(egui::vec2(ui.available_width(), 46.0))
+                            .min_size(egui::vec2(ui.available_width(), 26.0))
+                            .corner_radius(0)
+                            .fill(theme::PANEL)
                             .stroke(egui::Stroke::NONE),
                     );
                     if desc.addable {
@@ -213,8 +248,17 @@ impl WaverApp {
                         response.on_disabled_hover_text("计划中的模块，暂不可添加");
                     }
                 }
-                ui.add_space(16.0);
+                ui.add_space(8.0);
             }
+            egui::CollapsingHeader::new("开发中的模块").show(ui, |ui| {
+                for desc in MODULE_CATALOG.iter().filter(|d| !d.addable) {
+                    ui.add_enabled(
+                        false,
+                        egui::Button::new(format!("{} · {}", desc.name, desc.code)),
+                    )
+                    .on_disabled_hover_text("计划中的模块，暂不可添加");
+                }
+            });
             if matches == 0 {
                 theme::caption(ui, "没有匹配的模块");
             }
@@ -223,54 +267,51 @@ impl WaverApp {
 
     fn status_bar(&self, ui: &mut egui::Ui) {
         ui.horizontal_centered(|ui| {
-            ui.add_space(16.0);
-            ui.label(
-                egui::RichText::new(if self.status.running() {
-                    "● 引擎运行中"
-                } else {
-                    "● 引擎已停止"
-                })
-                .size(11.0)
-                .color(if self.status.running() {
+            ui.add_space(8.0);
+            ui.colored_label(
+                if self.status.running() {
                     theme::GOOD
                 } else {
                     theme::MUTED
-                }),
+                },
+                if self.status.running() {
+                    "引擎运行中"
+                } else {
+                    "引擎已停止"
+                },
             );
+            ui.separator();
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(if self.device_name.is_empty() {
+                        "未打开设备"
+                    } else {
+                        &self.device_name
+                    })
+                    .size(12.0)
+                    .color(theme::MUTED),
+                )
+                .truncate(),
+            )
+            .on_hover_text(self.error.as_deref().unwrap_or(&self.device_name));
+            if self.error.is_some() {
+                ui.colored_label(theme::DANGER, "设备错误")
+                    .on_hover_text(self.error.as_deref().unwrap_or(""));
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(16.0);
-                theme::caption(ui, "自动保存关闭");
+                theme::caption(ui, "未保存");
+                ui.separator();
                 theme::caption(
                     ui,
                     &format!(
-                        "1 个 Patch · {} 个节点 · {} 条连线",
-                        self.patch.graph.nodes().len(),
-                        self.patch.graph.edges().len()
+                        "{} Hz  /  {} 声道  /  {} 次中断",
+                        self.status.sample_rate(),
+                        self.status.channels(),
+                        self.status.xruns()
                     ),
                 );
             });
         });
-    }
-
-    fn device_details(&self, ui: &mut egui::Ui) {
-        ui.separator();
-        ui.add_space(12.0);
-        theme::caption(ui, "输出设备");
-        ui.label(if self.device_name.is_empty() {
-            "未打开设备"
-        } else {
-            &self.device_name
-        });
-        if let Some(error) = &self.error {
-            ui.colored_label(theme::DANGER, error);
-        }
-        ui.add_space(12.0);
-        theme::caption(ui, "操作提示");
-        theme::caption(ui, "拖动标题移动模块");
-        theme::caption(ui, "上下拖动旋钮调节参数");
-        theme::caption(ui, "点击 OUT，再点击 IN 连接");
-        theme::caption(ui, "悬停连线后按 Delete 删除");
-        theme::caption(ui, "Esc 取消当前连线");
     }
 }
 
@@ -343,6 +384,70 @@ mod tests {
     }
 
     #[test]
+    fn audio_sidebar_opens_applies_and_keeps_active_device_on_failure() {
+        let (ctx, mut app, _consumer) = fixture();
+        app.configure_audio_settings(
+            AudioCatalog {
+                backends: vec![waver_core::AudioBackend {
+                    id: "WASAPI".into(),
+                    label: "普通设备 / WASAPI".into(),
+                    unavailable_reason: None,
+                }],
+                devices: vec![waver_core::AudioDevice {
+                    id: "speaker".into(),
+                    backend: "WASAPI".into(),
+                    label: "测试声卡".into(),
+                }],
+                errors: vec![],
+            },
+            AudioSelection {
+                backend: "WASAPI".into(),
+                device: None,
+            },
+        );
+        let size = egui::vec2(1000.0, 640.0);
+        draw(&ctx, &mut app, size, vec![]);
+        let output = draw(&ctx, &mut app, size, vec![]);
+        click(
+            &ctx,
+            &mut app,
+            size,
+            text_rect(&output, "音频未连接").center(),
+        );
+        assert!(app.audio_settings.open);
+        assert!(matches!(
+            app.take_audio_request(),
+            Some(AudioSettingsRequest::Refresh)
+        ));
+        let output = draw(&ctx, &mut app, size, vec![]);
+        for label in ["音频设置", "声卡 / 输出设备", "应用音频设置"] {
+            assert!(
+                egui::Rect::from_min_size(egui::Pos2::ZERO, size)
+                    .contains_rect(text_rect(&output, label))
+            );
+        }
+        app.audio_settings.draft.device = Some("speaker".into());
+        click(
+            &ctx,
+            &mut app,
+            size,
+            text_rect(&output, "应用音频设置").center(),
+        );
+        assert_eq!(
+            app.take_audio_request(),
+            Some(AudioSettingsRequest::Apply(
+                app.audio_settings.draft.clone()
+            ))
+        );
+        app.audio_switch_failed("测试开流失败".into());
+        assert_eq!(app.audio_settings.active.device, None);
+        assert!(app.audio_settings.failed);
+        let output = draw(&ctx, &mut app, size, vec![]);
+        click(&ctx, &mut app, size, text_rect(&output, "关闭").center());
+        assert!(!app.audio_settings.open);
+    }
+
+    #[test]
     fn toolbar_and_panels_fit_supported_window_sizes() {
         let (ctx, mut app, _consumer) = fixture();
         for size in [egui::vec2(1440.0, 960.0), egui::vec2(1000.0, 640.0)] {
@@ -350,14 +455,10 @@ mod tests {
             let output = draw(&ctx, &mut app, size, vec![]);
             let brand = text_rect(&output, "waver");
             let patch = text_rect(&output, "未命名 Patch");
-            let play = text_rect(&output, "播放");
-            let mute = text_rect(&output, "静音");
-            let emergency = text_rect(&output, "紧急静音");
+            let status = text_rect(&output, "音频未连接");
             assert!(brand.right() < patch.left());
-            assert!(patch.right() < play.left());
-            assert!(play.right() < mute.left());
-            assert!(mute.right() < emergency.left());
-            assert!(emergency.right() < size.x);
+            assert!(patch.right() < status.left());
+            assert!(status.right() < size.x);
             for label in ["属性检查器", "模块", "搜索模块"] {
                 assert!(
                     egui::Rect::from_min_size(egui::Pos2::ZERO, size)
@@ -474,5 +575,71 @@ mod tests {
         assert_eq!(amp.value(), 0.2);
         click(&ctx, &mut app, size, value_rect.center());
         assert_eq!(app.patch.selected, Some(selected));
+    }
+
+    #[test]
+    fn vcf_cutoff_reads_in_hertz() {
+        let (ctx, mut app, _consumer) = fixture();
+        // Narrow window: the library collapses to a 180 px panel with an 8 px margin.
+        let size = egui::vec2(1000.0, 640.0);
+        draw(&ctx, &mut app, size, vec![]);
+        let output = draw(&ctx, &mut app, size, vec![]);
+        let entry = text_rect(&output, "高切滤波器  ·  VCF");
+        assert!(
+            entry.right() < 172.0,
+            "library entry must fit the narrow sidebar: {entry:?}"
+        );
+        click(&ctx, &mut app, size, entry.center());
+        let selected = app.patch.selected.unwrap();
+        assert_eq!(
+            app.patch.graph.node(selected).unwrap().kind,
+            waver_core::NodeKind::Vcf
+        );
+        let output = draw(&ctx, &mut app, size, vec![]);
+        let hz = text_rect(&output, "2500 Hz");
+        assert!(
+            hz.right() < size.x - 16.0,
+            "frequency readout must fit inside the inspector: {hz:?}"
+        );
+        let cutoff = app
+            .patch
+            .compiled
+            .as_ref()
+            .unwrap()
+            .params
+            .get(selected, ParamId::new(0))
+            .unwrap();
+        assert!((cutoff.value() - 2_500.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn scope_library_entry_adds_a_monitoring_node() {
+        let (ctx, mut app, _consumer) = fixture();
+        let size = egui::vec2(1000.0, 640.0);
+        draw(&ctx, &mut app, size, vec![]);
+        let output = draw(&ctx, &mut app, size, vec![]);
+        let entry = text_rect(&output, "示波器  ·  Scope");
+        assert!(
+            entry.right() < 172.0,
+            "library entry must fit the narrow sidebar: {entry:?}"
+        );
+        click(&ctx, &mut app, size, entry.center());
+        let selected = app.patch.selected.unwrap();
+        assert_eq!(
+            app.patch.graph.node(selected).unwrap().kind,
+            waver_core::NodeKind::Scope
+        );
+        let output = draw(&ctx, &mut app, size, vec![]);
+        let ports = text_rect(&output, "1 输入 / 0 输出");
+        assert!(
+            ports.right() < size.x - 16.0,
+            "port readout must fit inside the inspector: {ports:?}"
+        );
+        let blurb = waver_core::NodeKind::Scope.desc().inspector_blurb;
+        let blurb_rect = text_rect(&output, blurb);
+        assert!(
+            blurb_rect.right() < size.x - 16.0,
+            "inspector blurb must fit: {blurb_rect:?}"
+        );
     }
 }
